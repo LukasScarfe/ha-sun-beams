@@ -1,0 +1,13 @@
+{
+  "domain": "sun_beams",
+  "name": "Sun Beams",
+  "codeowners": ["@LukasScarfe"],
+  "config_flow": true,
+  "dependencies": ["http", "frontend", "websocket_api"],
+  "documentation": "https://github.com/LukasScarfe/ha-sun-beams",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/LukasScarfe/ha-sun-beams/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

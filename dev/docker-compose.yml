@@ -1,0 +1,17 @@
+# Throwaway Home Assistant instance for developing the Sun Beams integration.
+# NOT a production stack — lives in this repo, not in LukasScarfe/containers.
+# The integration is bind-mounted from the checkout so edits are picked up on a
+# container restart (`docker compose restart`). Config/state under ./config is
+# gitignored. Bring up:  docker compose -f dev/docker-compose.yml up -d
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: sun-beams-dev-ha
+    restart: unless-stopped
+    ports:
+      - "8124:8123"          # avoid clashing with anything on 8123
+    environment:
+      - TZ=America/Vancouver
+    volumes:
+      - ./config:/config
+      - ../custom_components/sun_beams:/config/custom_components/sun_beams:ro

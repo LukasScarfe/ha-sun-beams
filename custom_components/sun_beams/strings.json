@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sun Beams",
+        "description": "Set the building location. Sun Beams will try to fetch the building outline from OpenStreetMap; you place the interior and windows later in the card editor.",
+        "data": {
+          "latitude": "Latitude",
+          "longitude": "Longitude"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This location is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Sun Beams parameters",
+        "data": {
+          "albedo": "Ground reflectance (albedo, 0-1)",
+          "efficacy": "Luminous efficacy (lm/W) for the lux estimate"
+        }
+      }
+    }
+  }
+}
