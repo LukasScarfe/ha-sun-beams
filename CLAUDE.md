@@ -151,7 +151,10 @@ card shouldn't also be a setup tool, and HA config-flow forms can't host a drawi
   length while drawing a wall/window, plus per-edge and per-window length labels), a **scale bar**
   (nice 1/2/5 metre value), and **zoom/pan**: wheel zooms about the cursor, toolbar `＋`/`−`/`Reset
   view`, and dragging empty canvas pans. Manual zoom/pan freezes the auto-fit into `_view` (so adding
-  points no longer reflows the frame) until **Reset view**.
+  points no longer reflows the frame) until **Reset view**. Holding **Shift** while drawing locks the
+  new segment (via `_applyLock`) either along the reference wall or square to it (90°), whichever the
+  cursor is nearer — reference is the previous floor edge, else the nearest footprint wall; the lock
+  overrides the wall-proximity snap.
 
 Both theme through standard HA CSS vars (`--primary-text-color`, `--card-background-color`,
 `--primary-color`, `--accent-color`, …) with hard-coded fallbacks. The geometry helpers in the

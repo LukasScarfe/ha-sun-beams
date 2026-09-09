@@ -57,6 +57,21 @@ function nearestOnPolygon(p, poly) {
   return { pt: best, d: bestD };
 }
 // distance (px) from point c to segment a-b, all in screen coords
+// unit direction vector of the polygon edge nearest to point p (closed polygon)
+function nearestEdgeDir(p, poly) {
+  if (!poly || poly.length < 2) return null;
+  let best = null, bestD = Infinity;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const vx = b[0] - a[0], vy = b[1] - a[1];
+    const len2 = vx * vx + vy * vy || 1e-9;
+    let t = ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const d = Math.hypot(p[0] - (a[0] + t * vx), p[1] - (a[1] + t * vy));
+    if (d < bestD) { bestD = d; const L = Math.hypot(vx, vy) || 1; best = [vx / L, vy / L]; }
+  }
+  return best;
+}
 function distToSeg(cx, cy, ax, ay, bx, by) {
   const vx = bx - ax, vy = by - ay;
   const len2 = vx * vx + vy * vy || 1e-9;
@@ -97,6 +112,7 @@ class SunBeamsPanel extends HTMLElement {
     this._stageTf = null;
     this._view = null;      // manual zoom/pan: null = auto-fit; else {scale0,cx,cy,zoom,pan}
     this._hoverM = null;    // cursor position in metres, for the live ruler
+    this._shift = false;    // Shift held → lock the drawn segment to the wall / 90°
     this._moveBound = (e) => this._onPointerMove(e);
     this._upBound = (e) => this._onPointerUp(e);
   }
@@ -212,6 +228,14 @@ class SunBeamsPanel extends HTMLElement {
       const [ax, ay] = this._clientToViewbox(e.clientX, e.clientY, this._stageTf, rect);
       this._zoomAbout(e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP, ax, ay);
     }, { passive: false });
+    // Shift toggles the wall/90° lock; refresh the rubber-band as it changes
+    const onShift = (e) => {
+      if (e.shiftKey === this._shift) return;
+      this._shift = e.shiftKey;
+      if (this._rubberActive() && !this._ptr) this._renderStage();
+    };
+    window.addEventListener("keydown", onShift);
+    window.addEventListener("keyup", onShift);
   }
 
   _renderAll() {
@@ -281,6 +305,28 @@ class SunBeamsPanel extends HTMLElement {
     v.pan.x = ax - VB / 2 - (m[0] - v.cx) * scale;
     v.pan.y = ay - VB / 2 + (m[1] - v.cy) * scale;
     this._renderStage();
+  }
+
+  // reference wall direction (unit vector) the Shift lock aligns to
+  _lockRef(anchor) {
+    const g = this._geom;
+    if (this._tool === "floor" && g.floor.length >= 2) {
+      const a = g.floor[g.floor.length - 2], b = g.floor[g.floor.length - 1];
+      const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+      if (L > 1e-6) return [dx / L, dy / L];
+    }
+    return nearestEdgeDir(anchor, g.footprint) || [1, 0];
+  }
+
+  // project the cursor onto whichever of {along the wall, 90° to it} it's nearer
+  _applyLock(anchor, cursor) {
+    const ref = this._lockRef(anchor);
+    const perp = [-ref[1], ref[0]];
+    const vx = cursor[0] - anchor[0], vy = cursor[1] - anchor[1];
+    const dPar = vx * ref[0] + vy * ref[1];
+    const dPer = vx * perp[0] + vy * perp[1];
+    const [u, d] = Math.abs(dPar) >= Math.abs(dPer) ? [ref, dPar] : [perp, dPer];
+    return [anchor[0] + u[0] * d, anchor[1] + u[1] * d];
   }
 
   _rubberActive() {
@@ -371,12 +417,12 @@ class SunBeamsPanel extends HTMLElement {
     // live ruler: rubber-band from the last placed point to the cursor
     if (this._hoverM && this._rubberActive() && !this._ptr) {
       let anchor, to = this._hoverM;
-      if (this._tool === "window") {
-        anchor = this._pending;
+      anchor = this._tool === "window" ? this._pending : g.floor[g.floor.length - 1];
+      if (this._shift) {
+        to = this._applyLock(anchor, to);                 // Shift: lock along/perp to the wall
+      } else if (this._tool === "window") {
         const snap = nearestOnPolygon(to, g.footprint);   // preview the same snap a click gets
         if (snap && snap.d <= SNAP_M) to = snap.pt;
-      } else {
-        anchor = g.floor[g.floor.length - 1];
       }
       const [ax, ay] = tf.toXY(anchor[0], anchor[1]);
       const [bx, by] = tf.toXY(to[0], to[1]);
@@ -456,6 +502,7 @@ class SunBeamsPanel extends HTMLElement {
     if (!rect || !tf) return;
     if (e.clientX < rect.left || e.clientX > rect.right ||
         e.clientY < rect.top || e.clientY > rect.bottom) return;
+    this._shift = e.shiftKey;
     this._hoverM = tf.toM(...this._clientToViewbox(e.clientX, e.clientY, tf, rect));
     this._renderStage();
   }
@@ -515,6 +562,7 @@ class SunBeamsPanel extends HTMLElement {
       this._renderSide();
     } else if (!ptr.moved && !drag) {
       // a plain click on empty space → add via the current tool
+      this._shift = e.shiftKey;
       const m = ptr.tf.toM(...this._clientToViewbox(e.clientX, e.clientY, ptr.tf, ptr.rect));
       this._onClickAdd(m);
     }
@@ -551,12 +599,18 @@ class SunBeamsPanel extends HTMLElement {
   _onClickAdd(m) {
     const g = this._geom;
     if (this._tool === "floor") {
-      g.floor.push([r2(m[0]), r2(m[1])]);
+      let p = [m[0], m[1]];
+      if (this._shift && g.floor.length >= 1) p = this._applyLock(g.floor[g.floor.length - 1], p);
+      g.floor.push([r2(p[0]), r2(p[1])]);
       this._markDirty();
     } else if (this._tool === "window") {
       let p = [m[0], m[1]];
-      const snap = nearestOnPolygon(p, g.footprint);
-      if (snap && snap.d <= SNAP_M) p = [snap.pt[0], snap.pt[1]];
+      if (this._pending && this._shift) {
+        p = this._applyLock(this._pending, p);          // Shift overrides the wall-proximity snap
+      } else {
+        const snap = nearestOnPolygon(p, g.footprint);
+        if (snap && snap.d <= SNAP_M) p = [snap.pt[0], snap.pt[1]];
+      }
       if (!this._pending) {
         this._pending = p;
       } else {
@@ -597,6 +651,7 @@ class SunBeamsPanel extends HTMLElement {
       <p class="instr">${this._tool === "floor"
         ? "Click to add floor corners. Drag any corner, window end, or window to adjust. Beams land on this floor."
         : "Click two points on a wall to place a window (snaps to the outline). Drag any corner, window end, or window to adjust."}
+        <br>Hold <b>Shift</b> to lock the segment along the wall or square to it (90°).
         <br>Scroll to zoom about the cursor; drag empty space to pan. Lengths are in metres.</p>
       <h2>Windows (${(g.windows || []).length})</h2>
       <div class="wlist" id="sb-wlist"></div>
@@ -666,4 +721,4 @@ class SunBeamsPanel extends HTMLElement {
 }
 
 customElements.define("sun-beams-panel", SunBeamsPanel);
-console.info("%c SUN-BEAMS-PANEL %c 0.4.0 ", "background:#ff9800;color:#000", "");
+console.info("%c SUN-BEAMS-PANEL %c 0.5.0 ", "background:#ff9800;color:#000", "");
