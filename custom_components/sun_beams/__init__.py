@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import CONF_LATITUDE, CONF_LONGITUDE, DOMAIN
 from .coordinator import SunBeamsCoordinator
-from .frontend import async_register_frontend
+from .frontend import async_register_frontend, async_remove_panel
 from .websocket_api import async_register as async_register_ws
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,4 +49,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id, None)
+        # If no Sun Beams entries remain, take the setup panel down too.
+        remaining = [k for k in hass.data[DOMAIN] if not k.startswith("_")]
+        if not remaining:
+            async_remove_panel(hass)
     return unloaded

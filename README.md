@@ -14,8 +14,9 @@ card registers itself automatically.
 
 - Pulls your **building footprint** from OpenStreetMap (Overpass) so the plan is correctly
   oriented to true north, with no manual measuring.
-- You draw your **interior floor** and drop **windows** onto the walls in the card's editor;
-  each window's compass azimuth is derived from the wall it sits on.
+- You draw your **interior floor** and drop **windows** onto the walls in the integration's
+  **Sun Beams** sidebar panel; each window's compass azimuth is derived from the wall it sits on.
+  (The dashboard card is display-only.)
 - For every window it computes, live:
   - **Effective irradiance** `E = max(0, DNI·cosθ) + DHI·(1+cos β)/2 + albedo·GHI·(1−cos β)/2`
     (W/m²), exposed as `sensor.sun_beams_<window>_irradiance`.
@@ -41,8 +42,9 @@ blinds when the west window passes 500 W/m², warn about glare on the desk, and 
 2. Install **Sun Beams**, then **restart Home Assistant**.
 3. **Settings → Devices & Services → Add Integration → Sun Beams.** Confirm the location; it
    will try to fetch your building outline from OpenStreetMap.
-4. Add the **Sun Beams** card to a dashboard, pick your building, then use **Edit layout** on
-   the card to draw your floor and place windows.
+4. Open the **Sun Beams** panel in the left sidebar and draw your interior floor + place your
+   windows on the outline. Saving creates the per-window sensors.
+5. Add the **Sun Beams** card to a dashboard and pick your building — it displays the live plan.
 
 ## Options
 

@@ -37,8 +37,9 @@ custom_components/sun_beams/
   config_flow.py    user step (lat/lon, OSM seed) + options (albedo, efficacy)
   sensor.py         WindowIrradianceSensor + WindowLuxSensor, one pair per window
   websocket_api.py  sun_beams/get_geometry, sun_beams/save_geometry
-  frontend.py       serves /sun_beams_static + add_extra_js_url (card auto-loads)
-  frontend/sun-beams-card.js   the card — vanilla JS + SVG, NO build step
+  frontend.py       serves /sun_beams_static, add_extra_js_url (card), registers the panel
+  frontend/sun-beams-card.js    DISPLAY-ONLY card — vanilla JS + SVG, NO build step
+  frontend/sun-beams-panel.js   the geometry EDITOR — sidebar panel (draw floor, place windows)
   strings.json, translations/en.json
 tests/test_solar.py runs under plain python3 OR pytest
 dev/docker-compose.yml  throwaway HA (see below); dev/config/ is gitignored state
@@ -130,30 +131,43 @@ helpers in JS — **keep the two in sync** if you change either.
   default User-Agent — always send a real `User-Agent` (osm.py does). `overpass.kumi.systems` is the
   fallback mirror. The real 2930 Spruce building is way `327526032`.
 
-## The card (`frontend/sun-beams-card.js`)
+## Frontend: card + panel (both vanilla JS, no build step / no Lit)
 
-Vanilla custom element, **no build step / no Lit** (avoids a node toolchain on raccoon). It reads
-geometry via the WS command and reads sun/irradiance from `hass.states`. View mode renders the SVG;
-Edit mode lets you draw the floor and drop windows, saving via `sun_beams/save_geometry` (which
-reloads the entry and rebuilds the sensor set). Theming uses the standard HA CSS vars
-(`--primary-text-color`, `--card-background-color`, etc.) with hard-coded fallbacks.
+**Separation of concerns:** the display card only *reads*; all geometry *editing* lives in an
+integration-owned sidebar panel. This was a deliberate design decision (2026-09-09) — a display
+card shouldn't also be a setup tool, and HA config-flow forms can't host a drawing canvas.
+
+- **`sun-beams-card.js`** — display only. Reads geometry via `sun_beams/get_geometry` and
+  sun/irradiance from `hass.states`, renders the SVG plan (footprint, floor, glowing windows,
+  beams, sun compass). Matches a window to its sensor by `attributes.window_id` (azimuth fallback).
+  Its config editor only picks the config entry + a title.
+- **`sun-beams-panel.js`** — the editor. A full-page custom element registered as a sidebar panel
+  by `frontend.py` via `panel_custom.async_register_panel` (admin-only, URL `/sun-beams`). Loads
+  the OSM footprint, lets you draw the floor and drop windows (clicks snap to the nearest footprint
+  wall within `SNAP_M`; azimuth from `segmentOutwardAzimuth`), rename/delete windows, and **Save**
+  via `sun_beams/save_geometry` (reloads the entry, rebuilds the sensor set). HA sets `.hass` on the
+  element repeatedly — the panel builds its shell once and never re-renders the canvas from a `hass`
+  update, so the in-progress drawing is never clobbered.
+
+Both theme through standard HA CSS vars (`--primary-text-color`, `--card-background-color`,
+`--primary-color`, `--accent-color`, …) with hard-coded fallbacks. The geometry helpers in the
+panel mirror `geometry.py` — keep them in sync.
 
 ## Deploy to production (needs the user)
 
 1. HACS → custom repositories → add `https://github.com/LukasScarfe/ha-sun-beams` (Integration) →
    install → **user restarts HA** (raccoon can't).
 2. Settings → Devices & Services → Add **Sun Beams** (confirm location; OSM footprint auto-fetched).
-3. Add the **Sun Beams** card to the **2930 Spruce** dashboard via the Lovelace WS API (per
-   `claude/docs/homeassistant.md`), then use the card's **Edit layout** to draw the real windows.
+3. Open the **Sun Beams** sidebar panel and draw the floor + real windows (saving creates sensors).
+4. Add the **Sun Beams** display card to the **2930 Spruce** dashboard via the Lovelace WS API (per
+   `claude/docs/homeassistant.md`).
 
 Bump `manifest.json` `version` on every released change (HACS keys updates off it).
 
 ## Known limitations / TODO
 
-- **Sensor↔window matching is fragile.** The card finds a window's sensor by
-  `attributes.window_azimuth === win.azimuth` — two windows with the *same* azimuth collide. Better:
-  put the window `id` in the sensor attributes and match on that. (Do this before shipping multiple
-  same-facing windows.)
+- ~~Sensor↔window matching is fragile.~~ **Fixed** — the irradiance sensor exposes `window_id` and
+  the card matches on it (azimuth kept only as a fallback for old entities).
 - **Illuminance** is one broadband efficacy; calibrate against a real `..._illuminance` sensor near a
   window if accuracy matters. Beam-vs-diffuse have different efficacy.
 - **Beams** are a geometric projection (direction + reach), not a photometric floor-exposure sim.

@@ -148,6 +148,7 @@ class WindowIrradianceSensor(_WindowBase):
             "sky_diffuse": round(poa.sky_diffuse, 1),
             "ground": round(poa.ground, 1),
             "incidence_cos": round(poa.incidence_cos, 4),
+            "window_id": self._window.get(WIN_ID),
             "window_azimuth": self._win_az,
             "window_tilt": self._win_tilt,
         }
