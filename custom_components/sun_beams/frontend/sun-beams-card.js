@@ -44,10 +44,10 @@ class SunBeamsCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config || !config.entry_id) {
-      throw new Error("sun-beams-card: 'entry_id' is required");
-    }
-    this._config = config;
+    // Don't throw on a missing entry_id — that's the normal state right after
+    // adding the card from the picker, before a building is chosen. Render a
+    // prompt instead so the GUI editor can be used.
+    this._config = config || {};
     this._geometry = null; // force refetch on new config
   }
 
@@ -61,11 +61,20 @@ class SunBeamsCard extends HTMLElement {
       this._build();
       this._built = true;
     }
+    if (!this._config.entry_id) {
+      this._renderPrompt("Select a building in the card settings (⋮ → Edit).");
+      return;
+    }
     if (this._geometry === null) {
       this._fetchGeometry();
     } else {
       this._render();
     }
+  }
+
+  _renderPrompt(msg) {
+    this._svgHost.innerHTML = "";
+    this._hint.textContent = msg;
   }
 
   async _fetchGeometry() {
@@ -379,4 +388,4 @@ window.customCards.push({
   documentationURL: "https://github.com/LukasScarfe/ha-sun-beams",
 });
 
-console.info("%c SUN-BEAMS-CARD %c 0.2.0 ", "background:#ff9800;color:#000", "");
+console.info("%c SUN-BEAMS-CARD %c 0.3.1 ", "background:#ff9800;color:#000", "");
