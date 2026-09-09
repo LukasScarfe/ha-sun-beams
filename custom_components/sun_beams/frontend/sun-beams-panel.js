@@ -19,6 +19,9 @@ const D2R = Math.PI / 180;
 const SNAP_M = 1.6;      // snap window points to a footprint wall within this many metres
 const HIT_PX = 11;       // pointer hit-tolerance for handles, in screen pixels
 const DRAG_PX = 3;       // movement beyond this counts as a drag, not a click
+const VB = 640;          // svg viewBox size (square, world units)
+const ZOOM_MIN = 0.25, ZOOM_MAX = 40, ZOOM_STEP = 1.25;
+const SCALEBAR_PX = 130; // target on-screen length of the scale bar, in viewBox px
 
 /* ---------- geometry helpers (mirror geometry.py) ---------- */
 function centroid(pts) {
@@ -62,6 +65,14 @@ function distToSeg(cx, cy, ax, ay, bx, by) {
   return Math.hypot(cx - (ax + t * vx), cy - (ay + t * vy));
 }
 function r2(n) { return Math.round(n * 100) / 100; }
+function segLen(a, b) { return Math.hypot(b[0] - a[0], b[1] - a[1]); }
+function fmtLen(m) { return (m < 9.95 ? m.toFixed(1) : Math.round(m)) + " m"; }
+// nearest 1/2/5 ×10ⁿ value not exceeding maxM (for the scale bar)
+function niceLen(maxM) {
+  const p = Math.pow(10, Math.floor(Math.log10(maxM || 1)));
+  const n = (maxM || 1) / p;
+  return (n >= 5 ? 5 : n >= 2 ? 2 : 1) * p;
+}
 function svgEl(tag, attrs, children) {
   const e = document.createElementNS(SVGNS, tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]);
@@ -84,6 +95,8 @@ class SunBeamsPanel extends HTMLElement {
     this._ptr = null;       // active pointer gesture
     this._drag = null;      // active drag descriptor
     this._stageTf = null;
+    this._view = null;      // manual zoom/pan: null = auto-fit; else {scale0,cx,cy,zoom,pan}
+    this._hoverM = null;    // cursor position in metres, for the live ruler
     this._moveBound = (e) => this._onPointerMove(e);
     this._upBound = (e) => this._onPointerUp(e);
   }
@@ -188,6 +201,17 @@ class SunBeamsPanel extends HTMLElement {
     });
     // one persistent pointerdown listener on the stable container
     this._stage.addEventListener("pointerdown", (e) => this._onPointerDown(e));
+    // idle hover drives the live ruler; wheel zooms about the cursor
+    this._stage.addEventListener("pointermove", (e) => this._onHoverMove(e));
+    this._stage.addEventListener("pointerleave", () => {
+      if (this._hoverM) { this._hoverM = null; if (this._rubberActive()) this._renderStage(); }
+    });
+    this._stage.addEventListener("wheel", (e) => {
+      const rect = this._svgRect(); if (!rect || !this._stageTf) return;
+      e.preventDefault();
+      const [ax, ay] = this._clientToViewbox(e.clientX, e.clientY, this._stageTf, rect);
+      this._zoomAbout(e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP, ax, ay);
+    }, { passive: false });
   }
 
   _renderAll() {
@@ -207,7 +231,8 @@ class SunBeamsPanel extends HTMLElement {
     this._renderSide();
   }
 
-  _transform() {
+  // the content-fit base transform (zoom 1, no pan) that frames all geometry
+  _fitBase() {
     const pts = [];
     (this._geom.footprint || []).forEach((p) => pts.push(p));
     (this._geom.floor || []).forEach((p) => pts.push(p));
@@ -220,12 +245,64 @@ class SunBeamsPanel extends HTMLElement {
     }
     const span = Math.max(maxX - minX, maxY - minY) || 1;
     const pad = span * 0.12 + 2;
-    const W = 640, H = 640;
-    const scale = (W - 60) / (span + 2 * pad);
-    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-    const toXY = (x, y) => [W / 2 + (x - cx) * scale, H / 2 - (y - cy) * scale];
-    const toM = (sx, sy) => [cx + (sx - W / 2) / scale, cy - (sy - H / 2) / scale];
-    return { toXY, toM, W, H, scale };
+    const scale0 = (VB - 60) / (span + 2 * pad);
+    return { scale0, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+  }
+
+  // once the user zooms/pans we freeze the current fit so the view stops
+  // reflowing as points are added; Reset view clears it back to auto-fit.
+  _ensureView() {
+    if (!this._view) {
+      const f = this._fitBase();
+      this._view = { scale0: f.scale0, cx: f.cx, cy: f.cy, zoom: 1, pan: { x: 0, y: 0 } };
+    }
+    return this._view;
+  }
+
+  _transform() {
+    const base = this._view || (() => {
+      const f = this._fitBase();
+      return { scale0: f.scale0, cx: f.cx, cy: f.cy, zoom: 1, pan: { x: 0, y: 0 } };
+    })();
+    const scale = base.scale0 * base.zoom;
+    const px = base.pan.x, py = base.pan.y;
+    const toXY = (x, y) => [VB / 2 + (x - base.cx) * scale + px, VB / 2 - (y - base.cy) * scale + py];
+    const toM = (sx, sy) => [base.cx + (sx - VB / 2 - px) / scale, base.cy - (sy - VB / 2 - py) / scale];
+    return { toXY, toM, W: VB, H: VB, scale };
+  }
+
+  // zoom about a viewBox anchor point, keeping the metre point under it fixed
+  _zoomAbout(factor, ax, ay) {
+    const v = this._ensureView();
+    const tf = this._transform();
+    const m = tf.toM(ax, ay);
+    v.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v.zoom * factor));
+    const scale = v.scale0 * v.zoom;
+    v.pan.x = ax - VB / 2 - (m[0] - v.cx) * scale;
+    v.pan.y = ay - VB / 2 + (m[1] - v.cy) * scale;
+    this._renderStage();
+  }
+
+  _rubberActive() {
+    const g = this._geom;
+    return !!(g && ((this._tool === "floor" && g.floor && g.floor.length >= 1) ||
+                    (this._tool === "window" && this._pending)));
+  }
+
+  // a metre-length label centred on the screen midpoint of a metre segment
+  _lenLabel(tf, a, b, opts) {
+    opts = opts || {};
+    const [x1, y1] = tf.toXY(a[0], a[1]);
+    const [x2, y2] = tf.toXY(b[0], b[1]);
+    const t = svgEl("text", {
+      x: (x1 + x2) / 2, y: (y1 + y2) / 2 + (opts.dy || 0), "text-anchor": "middle",
+      "font-size": 10.5, "font-weight": opts.strong ? 600 : 400,
+      "paint-order": "stroke", stroke: "var(--card-background-color,#fff)", "stroke-width": 3,
+      "stroke-linejoin": "round", fill: opts.fill || "var(--secondary-text-color,#607d8b)",
+      "font-variant-numeric": "tabular-nums", style: "pointer-events:none",
+    }, []);
+    t.textContent = fmtLen(segLen(a, b));
+    return t;
   }
 
   // render the plan; pass a frozen transform during a drag so it doesn't rescale
@@ -257,6 +334,11 @@ class SunBeamsPanel extends HTMLElement {
           stroke: "var(--card-background-color,#fff)", "stroke-width": 1.5, style: "cursor:grab",
         }, []));
       });
+      // edge length labels (include the closing edge once it's a polygon)
+      const nEdges = g.floor.length >= 3 ? g.floor.length : g.floor.length - 1;
+      for (let i = 0; i < nEdges; i++) {
+        kids.push(this._lenLabel(tf, g.floor[i], g.floor[(i + 1) % g.floor.length], { dy: -4 }));
+      }
     }
     // windows: line body (draggable) + endpoint handles (draggable) + label
     (g.windows || []).forEach((w, i) => {
@@ -278,12 +360,50 @@ class SunBeamsPanel extends HTMLElement {
       }, []);
       t.textContent = w.name || ("Window " + (i + 1));
       kids.push(t);
+      kids.push(this._lenLabel(tf, [w.x1, w.y1], [w.x2, w.y2],
+        { dy: 15, fill: "var(--accent-color,#ff9800)" }));
     });
     // pending first point of a new window
     if (this._pending) {
       const [x, y] = tf.toXY(this._pending[0], this._pending[1]);
       kids.push(svgEl("circle", { cx: x, cy: y, r: 5, fill: "var(--error-color,#e53935)" }, []));
     }
+    // live ruler: rubber-band from the last placed point to the cursor
+    if (this._hoverM && this._rubberActive() && !this._ptr) {
+      let anchor, to = this._hoverM;
+      if (this._tool === "window") {
+        anchor = this._pending;
+        const snap = nearestOnPolygon(to, g.footprint);   // preview the same snap a click gets
+        if (snap && snap.d <= SNAP_M) to = snap.pt;
+      } else {
+        anchor = g.floor[g.floor.length - 1];
+      }
+      const [ax, ay] = tf.toXY(anchor[0], anchor[1]);
+      const [bx, by] = tf.toXY(to[0], to[1]);
+      kids.push(svgEl("line", {
+        x1: ax, y1: ay, x2: bx, y2: by, stroke: "var(--primary-color,#03a9f4)",
+        "stroke-width": 1.5, "stroke-dasharray": "4 4", style: "pointer-events:none",
+      }, []));
+      kids.push(this._lenLabel(tf, anchor, to,
+        { dy: -6, strong: true, fill: "var(--primary-color,#0277bd)" }));
+    }
+    // scale bar (bottom-left, in fixed viewBox coords)
+    const barM = niceLen(SCALEBAR_PX / tf.scale);
+    const barPx = barM * tf.scale;
+    const bx0 = 18, by0 = tf.H - 22;
+    kids.push(svgEl("line", { x1: bx0, y1: by0, x2: bx0 + barPx, y2: by0,
+      stroke: "var(--primary-text-color,#455a64)", "stroke-width": 2, style: "pointer-events:none" }, []));
+    for (const tx of [bx0, bx0 + barPx]) {
+      kids.push(svgEl("line", { x1: tx, y1: by0 - 4, x2: tx, y2: by0 + 4,
+        stroke: "var(--primary-text-color,#455a64)", "stroke-width": 2, style: "pointer-events:none" }, []));
+    }
+    const barLbl = svgEl("text", { x: bx0 + barPx / 2, y: by0 - 7, "text-anchor": "middle",
+      "font-size": 11, "paint-order": "stroke", stroke: "var(--card-background-color,#fff)",
+      "stroke-width": 3, "stroke-linejoin": "round", fill: "var(--primary-text-color,#455a64)",
+      "font-variant-numeric": "tabular-nums", style: "pointer-events:none" }, []);
+    barLbl.textContent = fmtLen(barM);
+    kids.push(barLbl);
+
     const s = svgEl("svg", { viewBox: `0 0 ${tf.W} ${tf.H}` }, kids);
     this._stage.innerHTML = "";
     this._stage.appendChild(s);
@@ -328,6 +448,18 @@ class SunBeamsPanel extends HTMLElement {
     return null;
   }
 
+  // idle cursor tracking (no button) → live ruler rubber-band
+  _onHoverMove(e) {
+    if (this._ptr) return;            // an active gesture handles its own moves
+    if (!this._rubberActive()) { if (this._hoverM) this._hoverM = null; return; }
+    const rect = this._svgRect(), tf = this._stageTf;
+    if (!rect || !tf) return;
+    if (e.clientX < rect.left || e.clientX > rect.right ||
+        e.clientY < rect.top || e.clientY > rect.bottom) return;
+    this._hoverM = tf.toM(...this._clientToViewbox(e.clientX, e.clientY, tf, rect));
+    this._renderStage();
+  }
+
   _onPointerDown(e) {
     const rect = this._svgRect();
     if (!rect || !this._stageTf) return;
@@ -342,7 +474,8 @@ class SunBeamsPanel extends HTMLElement {
       drag.grab = downM;
       drag.o = { x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2 };
     }
-    this._ptr = { rect, tf, startX: e.clientX, startY: e.clientY, moved: false };
+    this._ptr = { rect, tf, startX: e.clientX, startY: e.clientY,
+                  lastX: e.clientX, lastY: e.clientY, moved: false };
     this._drag = drag;
     window.addEventListener("pointermove", this._moveBound);
     window.addEventListener("pointerup", this._upBound);
@@ -359,6 +492,14 @@ class SunBeamsPanel extends HTMLElement {
       this._applyDrag(m);
       this._renderStage(this._ptr.tf); // frozen transform: no rescale mid-drag
       if (!this._dirty) this._markDirty();
+    } else if (!this._drag && this._ptr.moved) {
+      // drag on empty canvas → pan the view (a click without motion still adds a point)
+      const v = this._ensureView();
+      const k = this._ptr.tf.W / this._ptr.rect.width; // client px → viewBox px
+      v.pan.x += (e.clientX - this._ptr.lastX) * k;
+      v.pan.y += (e.clientY - this._ptr.lastY) * k;
+      this._ptr.lastX = e.clientX; this._ptr.lastY = e.clientY;
+      this._renderStage();
     }
   }
 
@@ -447,9 +588,16 @@ class SunBeamsPanel extends HTMLElement {
         <button data-act="undo">Undo</button>
         <button data-act="clearfloor">Clear floor</button>
       </div>
+      <h2>View</h2>
+      <div class="sb-tools">
+        <button data-act="zoomout" title="Zoom out">−</button>
+        <button data-act="zoomin" title="Zoom in">＋</button>
+        <button data-act="resetview">Reset view</button>
+      </div>
       <p class="instr">${this._tool === "floor"
         ? "Click to add floor corners. Drag any corner, window end, or window to adjust. Beams land on this floor."
-        : "Click two points on a wall to place a window (snaps to the outline). Drag any corner, window end, or window to adjust."}</p>
+        : "Click two points on a wall to place a window (snaps to the outline). Drag any corner, window end, or window to adjust."}
+        <br>Scroll to zoom about the cursor; drag empty space to pan. Lengths are in metres.</p>
       <h2>Windows (${(g.windows || []).length})</h2>
       <div class="wlist" id="sb-wlist"></div>
       <button class="sb-save" id="sb-save" ${this._dirty ? "" : "disabled"}>Save layout</button>
@@ -472,6 +620,9 @@ class SunBeamsPanel extends HTMLElement {
     this._side.querySelector('[data-act="clearfloor"]').addEventListener("click", () => {
       if (g.floor.length) { g.floor = []; this._markDirty(); this._renderStage(); this._renderSide(); }
     });
+    this._side.querySelector('[data-act="zoomin"]').addEventListener("click", () => this._zoomAbout(ZOOM_STEP, VB / 2, VB / 2));
+    this._side.querySelector('[data-act="zoomout"]').addEventListener("click", () => this._zoomAbout(1 / ZOOM_STEP, VB / 2, VB / 2));
+    this._side.querySelector('[data-act="resetview"]').addEventListener("click", () => { this._view = null; this._renderStage(); });
     wl.querySelectorAll("input[data-i]").forEach((inp) =>
       inp.addEventListener("input", (e) => {
         g.windows[+e.target.dataset.i].name = e.target.value;
@@ -515,4 +666,4 @@ class SunBeamsPanel extends HTMLElement {
 }
 
 customElements.define("sun-beams-panel", SunBeamsPanel);
-console.info("%c SUN-BEAMS-PANEL %c 0.3.0 ", "background:#ff9800;color:#000", "");
+console.info("%c SUN-BEAMS-PANEL %c 0.4.0 ", "background:#ff9800;color:#000", "");

@@ -147,7 +147,11 @@ card shouldn't also be a setup tool, and HA config-flow forms can't host a drawi
   wall within `SNAP_M`; azimuth from `segmentOutwardAzimuth`), rename/delete windows, and **Save**
   via `sun_beams/save_geometry` (reloads the entry, rebuilds the sensor set). HA sets `.hass` on the
   element repeatedly — the panel builds its shell once and never re-renders the canvas from a `hass`
-  update, so the in-progress drawing is never clobbered.
+  update, so the in-progress drawing is never clobbered. The canvas has a **live ruler** (rubber-band
+  length while drawing a wall/window, plus per-edge and per-window length labels), a **scale bar**
+  (nice 1/2/5 metre value), and **zoom/pan**: wheel zooms about the cursor, toolbar `＋`/`−`/`Reset
+  view`, and dragging empty canvas pans. Manual zoom/pan freezes the auto-fit into `_view` (so adding
+  points no longer reflows the frame) until **Reset view**.
 
 Both theme through standard HA CSS vars (`--primary-text-color`, `--card-background-color`,
 `--primary-color`, `--accent-color`, …) with hard-coded fallbacks. The geometry helpers in the
