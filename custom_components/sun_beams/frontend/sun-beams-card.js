@@ -28,6 +28,28 @@ function glowColor(t) {
   return lerpColor([255, 207, 92], [255, 122, 61], (t - 0.5) / 0.5);
 }
 
+// Pick ~5 evenly spaced tick times, snapped to a whole number of hours.
+function timeTicks(t0, t1) {
+  const span = t1 - t0;
+  const stepH = span > 6 * 86400 ? 24 : span > 2 * 86400 ? 12 : span > 86400 ? 6 : span > 6 * 3600 ? 3 : 1;
+  const step = stepH * 3600;
+  const start = Math.ceil(t0 / step) * step;
+  const out = [];
+  for (let t = start; t <= t1; t += step) out.push(t);
+  return out;
+}
+
+// Short label: time-of-day for spans up to ~2 days, else a weekday/short date.
+function fmtTick(t, span) {
+  const d = new Date(t * 1000);
+  if (span > 2 * 86400) {
+    return span > 6 * 86400
+      ? d.toLocaleDateString([], { month: "numeric", day: "numeric" })
+      : d.toLocaleDateString([], { weekday: "short" });
+  }
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 function svg(tag, attrs, children) {
   const e = document.createElementNS(SVGNS, tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]);
@@ -101,13 +123,19 @@ class SunBeamsCard extends HTMLElement {
       .wrap { position: relative; padding: 8px; }
       svg { width: 100%; height: auto; display: block; }
       .hint { font-size: 12px; color: var(--secondary-text-color,#666); margin-top: 6px; }
+      .cloud { margin-top: 4px; }
+      .cloud-title { font-size: 12px; color: var(--secondary-text-color,#888);
+                     margin: 6px 2px 2px; display: flex; justify-content: space-between; }
     `;
     const wrap = document.createElement("div");
     wrap.className = "wrap";
     this._svgHost = document.createElement("div");
+    this._cloudHost = document.createElement("div");
+    this._cloudHost.className = "cloud";
     this._hint = document.createElement("div");
     this._hint.className = "hint";
     wrap.appendChild(this._svgHost);
+    wrap.appendChild(this._cloudHost);
     wrap.appendChild(this._hint);
     root.appendChild(style);
     root.appendChild(wrap);
@@ -123,13 +151,19 @@ class SunBeamsCard extends HTMLElement {
     return { elev: Number(e), az: Number(a) };
   }
 
-  // Combine footprint + floor + windows into a bounding box, build a
-  // metres->SVG transform (north up).
+  _hasFloor() {
+    const g = this._geometry || {};
+    return !!(g.floor && g.floor.length >= 3);
+  }
+
+  // Bounding box for the plan. Once a floorplan is drawn we frame on the floor
+  // (+ its windows) and drop the whole-building footprint entirely; only when no
+  // floor exists yet do we fall back to the footprint so the card isn't empty.
   _transform() {
     const g = this._geometry || {};
     const pts = [];
-    (g.footprint || []).forEach((p) => pts.push(p));
-    (g.floor || []).forEach((p) => pts.push(p));
+    if (this._hasFloor()) (g.floor || []).forEach((p) => pts.push(p));
+    else (g.footprint || []).forEach((p) => pts.push(p));
     (g.windows || []).forEach((w) => {
       pts.push([w.x1, w.y1]);
       pts.push([w.x2, w.y2]);
@@ -213,16 +247,17 @@ class SunBeamsCard extends HTMLElement {
       kids.push(t);
     }
 
-    // footprint
-    if (g.footprint && g.footprint.length >= 3) {
+    // footprint — only as a fallback before any floorplan is drawn. Once a
+    // floor exists the card shows the floorplan alone, not the whole building.
+    if (!this._hasFloor() && g.footprint && g.footprint.length >= 3) {
       kids.push(svg("polygon", {
         points: g.footprint.map((p) => tf.toXY(p[0], p[1]).join(",")).join(" "),
         fill: "var(--secondary-background-color,#f2f2f2)", "fill-opacity": 0.5,
         stroke: "var(--primary-text-color,#555)", "stroke-width": 1.5,
       }, []));
     }
-    // interior floor
-    if (g.floor && g.floor.length >= 3) {
+    // interior floor (the floorplan walls)
+    if (this._hasFloor()) {
       kids.push(svg("polygon", {
         points: g.floor.map((p) => tf.toXY(p[0], p[1]).join(",")).join(" "),
         fill: "var(--card-background-color,#fff)", "fill-opacity": 0.6,
@@ -307,6 +342,148 @@ class SunBeamsCard extends HTMLElement {
     } else {
       this._hint.textContent = "";
     }
+
+    this._maybeFetchCloud();
+    this._renderCloud();
+  }
+
+  _cloudHours() {
+    const past = Math.max(0, Math.min(2160, Number(this._config.cloud_past_hours ?? 24)));
+    const future = Math.max(0, Math.min(360, Number(this._config.cloud_future_hours ?? 24)));
+    return { past, future };
+  }
+
+  // Cloud cover comes straight from Open-Meteo in the browser (CORS-enabled, no
+  // key) using the building's projection origin — keeping it client-side lets the
+  // time window be tuned per-card without touching the coordinator. unixtime so
+  // "now" is trivial to place regardless of the building's timezone.
+  _maybeFetchCloud() {
+    const o = this._geometry && this._geometry.origin;
+    if (!o || o.lat == null || o.lon == null) return;
+    const { past, future } = this._cloudHours();
+    const key = `${o.lat},${o.lon},${past},${future}`;
+    const fresh = this._cloud && this._cloudKey === key && (Date.now() - this._cloudAt) < 15 * 60 * 1000;
+    if (fresh || this._cloudLoading === key) return;
+    this._cloudLoading = key;
+    const pastDays = Math.min(92, Math.max(0, Math.ceil((past + 1) / 24)));
+    const fcDays = Math.min(16, Math.max(1, Math.ceil((future + 1) / 24)));
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${o.lat}&longitude=${o.lon}` +
+      `&hourly=cloud_cover&past_days=${pastDays}&forecast_days=${fcDays}&timeformat=unixtime&timezone=auto`;
+    fetch(url)
+      .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then((j) => {
+        const h = j && j.hourly;
+        this._cloud = h && h.time ? { time: h.time, cloud: h.cloud_cover } : null;
+        this._cloudKey = key; this._cloudAt = Date.now(); this._cloudLoading = null; this._cloudErr = null;
+        this._renderCloud();
+      })
+      .catch((e) => { this._cloudLoading = null; this._cloudErr = String(e); this._renderCloud(); });
+  }
+
+  _renderCloud() {
+    const host = this._cloudHost;
+    if (!host) return;
+    host.innerHTML = "";
+    const o = this._geometry && this._geometry.origin;
+    if (!o || o.lat == null || o.lon == null) return; // no location yet
+    const c = this._cloud;
+    if (!c || !c.time || !c.time.length) {
+      if (this._cloudErr) {
+        const d = document.createElement("div");
+        d.className = "hint";
+        d.textContent = "⚠ cloud data: " + this._cloudErr;
+        host.appendChild(d);
+      }
+      return;
+    }
+
+    const { past, future } = this._cloudHours();
+    const now = Date.now() / 1000;
+    const t0 = now - past * 3600, t1 = now + future * 3600;
+    const idx = [];
+    for (let i = 0; i < c.time.length; i++) {
+      if (c.time[i] >= t0 && c.time[i] <= t1 && c.cloud[i] != null) idx.push(i);
+    }
+    if (idx.length < 2) return;
+
+    const W = 600, H = 150, mL = 30, mR = 8, mT = 8, mB = 20;
+    const px = (t) => mL + ((t - t0) / (t1 - t0)) * (W - mL - mR);
+    const py = (v) => mT + (1 - v / 100) * (H - mT - mB);
+
+    const title = document.createElement("div");
+    title.className = "cloud-title";
+    const past_l = past >= 48 ? `${Math.round(past / 24)} d` : `${past} h`;
+    const fut_l = future >= 48 ? `${Math.round(future / 24)} d` : `${future} h`;
+    let nowI = idx[0];
+    for (const i of idx) if (Math.abs(c.time[i] - now) < Math.abs(c.time[nowI] - now)) nowI = i;
+    title.innerHTML = `<span>☁ Cloud cover — past ${past_l} · next ${fut_l}</span>` +
+      `<span>${Math.round(Number(c.cloud[nowI] ?? 0))}% now</span>`;
+    host.appendChild(title);
+
+    const kids = [];
+    const defs = svg("defs", {}, []);
+    defs.innerHTML = `
+      <linearGradient id="sb-cloudfill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="var(--primary-color,#03a9f4)" stop-opacity="0.35"/>
+        <stop offset="1" stop-color="var(--primary-color,#03a9f4)" stop-opacity="0.03"/>
+      </linearGradient>`;
+    kids.push(defs);
+
+    // gridlines at 0/50/100 %
+    for (const v of [0, 50, 100]) {
+      const y = py(v);
+      kids.push(svg("line", {
+        x1: mL, y1: y, x2: W - mR, y2: y,
+        stroke: "var(--divider-color,#8884)", "stroke-width": 1,
+      }, []));
+      const lbl = svg("text", {
+        x: mL - 4, y: y + 3, "text-anchor": "end", "font-size": 9,
+        fill: "var(--secondary-text-color,#888)",
+      }, []);
+      lbl.textContent = v + "%";
+      kids.push(lbl);
+    }
+
+    // area + line
+    const line = idx.map((i) => `${px(c.time[i]).toFixed(1)},${py(c.cloud[i]).toFixed(1)}`);
+    const area = `M${px(c.time[idx[0]]).toFixed(1)},${py(0).toFixed(1)} L` +
+      line.join(" L") + ` L${px(c.time[idx[idx.length - 1]]).toFixed(1)},${py(0).toFixed(1)} Z`;
+    kids.push(svg("path", { d: area, fill: "url(#sb-cloudfill)", stroke: "none" }, []));
+    kids.push(svg("path", {
+      d: "M" + line.join(" L"), fill: "none",
+      stroke: "var(--primary-color,#03a9f4)", "stroke-width": 1.8, "stroke-linejoin": "round",
+    }, []));
+
+    // "now" divider between historic and predicted
+    if (now > t0 && now < t1) {
+      const nx = px(now);
+      kids.push(svg("line", {
+        x1: nx, y1: mT, x2: nx, y2: H - mB,
+        stroke: "var(--accent-color,#ff9800)", "stroke-width": 1.2, "stroke-dasharray": "3 3",
+      }, []));
+      const nl = svg("text", {
+        x: nx, y: mT + 8, "text-anchor": nx > W - 40 ? "end" : "middle", "font-size": 9,
+        fill: "var(--accent-color,#ff9800)",
+      }, []);
+      nl.textContent = "now";
+      kids.push(nl);
+    }
+
+    // a few time ticks along the bottom
+    const ticks = timeTicks(t0, t1);
+    for (const t of ticks) {
+      if (t < t0 || t > t1) continue;
+      const x = px(t);
+      const lbl = svg("text", {
+        x, y: H - 6, "text-anchor": "middle", "font-size": 9,
+        fill: "var(--secondary-text-color,#888)",
+      }, []);
+      lbl.textContent = fmtTick(t, t1 - t0);
+      kids.push(lbl);
+    }
+
+    const chart = svg("svg", { viewBox: `0 0 ${W} ${H}` }, kids);
+    host.appendChild(chart);
   }
 
   static getConfigElement() {
@@ -314,7 +491,7 @@ class SunBeamsCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { type: "custom:sun-beams-card", entry_id: "", title: "Sun Beams" };
+    return { type: "custom:sun-beams-card", entry_id: "", title: "Sun Beams", cloud_past_hours: 24, cloud_future_hours: 24 };
   }
 }
 
@@ -360,10 +537,22 @@ class SunBeamsCardEditor extends HTMLElement {
           <option value="">— choose —</option>${opts}
         </select>
       </label>
-      <label style="display:block;">Title
+      <label style="display:block;margin-bottom:8px;">Title
         <input id="sb-title" type="text" value="${this._config.title || ""}"
                style="display:block;width:100%;margin-top:4px;">
       </label>
+      <div style="display:flex;gap:12px;">
+        <label style="flex:1;">Cloud history (hours)
+          <input id="sb-past" type="number" min="0" max="2160" step="1"
+                 value="${this._config.cloud_past_hours ?? 24}"
+                 style="display:block;width:100%;margin-top:4px;">
+        </label>
+        <label style="flex:1;">Cloud forecast (hours)
+          <input id="sb-future" type="number" min="0" max="360" step="1"
+                 value="${this._config.cloud_future_hours ?? 24}"
+                 style="display:block;width:100%;margin-top:4px;">
+        </label>
+      </div>
       <p style="color:var(--secondary-text-color,#888);font-size:12px;margin-top:10px;">
         Draw your floor and place windows in the <b>Sun Beams</b> panel (left sidebar).</p>`;
     this.appendChild(wrap);
@@ -372,6 +561,12 @@ class SunBeamsCardEditor extends HTMLElement {
     });
     wrap.querySelector("#sb-title").addEventListener("input", (e) => {
       this._config.title = e.target.value; this._emit();
+    });
+    wrap.querySelector("#sb-past").addEventListener("input", (e) => {
+      this._config.cloud_past_hours = Number(e.target.value); this._emit();
+    });
+    wrap.querySelector("#sb-future").addEventListener("input", (e) => {
+      this._config.cloud_future_hours = Number(e.target.value); this._emit();
     });
   }
 }
@@ -388,4 +583,4 @@ window.customCards.push({
   documentationURL: "https://github.com/LukasScarfe/ha-sun-beams",
 });
 
-console.info("%c SUN-BEAMS-CARD %c 0.3.1 ", "background:#ff9800;color:#000", "");
+console.info("%c SUN-BEAMS-CARD %c 0.4.0 ", "background:#ff9800;color:#000", "");

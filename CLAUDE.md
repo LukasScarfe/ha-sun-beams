@@ -138,9 +138,15 @@ integration-owned sidebar panel. This was a deliberate design decision (2026-09-
 card shouldn't also be a setup tool, and HA config-flow forms can't host a drawing canvas.
 
 - **`sun-beams-card.js`** — display only. Reads geometry via `sun_beams/get_geometry` and
-  sun/irradiance from `hass.states`, renders the SVG plan (footprint, floor, glowing windows,
-  beams, sun compass). Matches a window to its sensor by `attributes.window_id` (azimuth fallback).
-  Its config editor only picks the config entry + a title.
+  sun/irradiance from `hass.states`, renders the SVG plan (**floorplan walls only** once a floor is
+  drawn — the whole-building footprint shows *only* as a fallback before any floor exists; the plan
+  also frames/zooms on the floor in that case), glowing windows, beams, sun compass. Matches a
+  window to its sensor by `attributes.window_id` (azimuth fallback). Below the plan it draws a
+  **cloud-cover plot** (historic + forecast, `now` divider): fetched **client-side straight from
+  Open-Meteo** (`hourly=cloud_cover`, `timeformat=unixtime`, CORS-enabled, no key) using
+  `geometry.origin` lat/lon, cached 15 min. The window is customizable per-card via
+  `cloud_past_hours` / `cloud_future_hours` config (default 24/24). Its config editor picks the
+  config entry, a title, and those two hour fields.
 - **`sun-beams-panel.js`** — the editor. A full-page custom element registered as a sidebar panel
   by `frontend.py` via `panel_custom.async_register_panel` (admin-only, URL `/sun-beams`). Loads
   the OSM footprint, lets you draw the floor and drop windows (clicks snap to the nearest footprint
@@ -184,8 +190,9 @@ Bump `manifest.json` `version` on every released change (HACS keys updates off i
   window if accuracy matters. Beam-vs-diffuse have different efficacy.
 - **Beams** are a geometric projection (direction + reach), not a photometric floor-exposure sim.
 - **Sky model** is isotropic (no Perez circumsolar/horizon brightening).
-- **Forecast/timeline** — coordinator only fetches `current`; Open-Meteo also returns hourly, which
-  would enable a "sun through the day" scrubber and predictive automations.
+- **Forecast/timeline** — coordinator only fetches `current` (the card's cloud plot fetches hourly
+  itself, client-side). Pulling hourly *irradiance* server-side would enable a "sun through the day"
+  scrubber and predictive automations.
 - **Multiple buildings** — supported by the entry unique-id (lat,lon) but untested with >1 entry.
 - No `strings.json` coverage for entities yet; entity names come from the window names.
 
