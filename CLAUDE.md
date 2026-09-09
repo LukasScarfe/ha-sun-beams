@@ -145,7 +145,12 @@ card shouldn't also be a setup tool, and HA config-flow forms can't host a drawi
   by `frontend.py` via `panel_custom.async_register_panel` (admin-only, URL `/sun-beams`). Loads
   the OSM footprint, lets you draw the floor and drop windows (clicks snap to the nearest footprint
   wall within `SNAP_M`; azimuth from `segmentOutwardAzimuth`), rename/delete windows, and **Save**
-  via `sun_beams/save_geometry` (reloads the entry, rebuilds the sensor set). HA sets `.hass` on the
+  via `sun_beams/save_geometry` (reloads the entry, rebuilds the sensor set). Three tools: **Look
+  around** (default — no click-to-add, just pan/zoom and drag handles), **Draw floor**, **Add
+  window**; dragging handles works under any tool. Dragging a floor (wall) corner snaps it onto the
+  footprint outline within `CORNER_SNAP_M` (0.1 m). **Undo** is snapshot-based (`_pushUndo` stacks
+  `{floor, windows}` before each add/delete/clear/drag) so it reverts a moved corner to its previous
+  position, not just the last placed point. HA sets `.hass` on the
   element repeatedly — the panel builds its shell once and never re-renders the canvas from a `hass`
   update, so the in-progress drawing is never clobbered. The canvas has a **live ruler** (rubber-band
   length while drawing a wall/window, plus per-edge and per-window length labels), a **scale bar**

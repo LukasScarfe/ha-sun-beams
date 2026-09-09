@@ -7,16 +7,21 @@
  * only reads it. Dependency-free.
  *
  * Interaction:
+ *   - Look around tool (default) : no click-to-add; just pan/zoom and drag
+ *     handles. Wall (floor) corners snap onto the building outline within 0.1 m.
  *   - Draw floor tool : click to add interior-floor corners.
  *   - Add window tool : click two points on a wall to place a window.
  *   - Drag (any tool) : floor corners, window endpoints, and whole windows are
  *     draggable handles. Endpoint drags snap to the nearest building wall; a
  *     window's compass azimuth is recomputed from its wall as it moves.
+ *   - Undo : snapshot-based; reverts the last add/delete/clear/drag, so a moved
+ *     corner returns to its previous position.
  */
 
 const SVGNS = "http://www.w3.org/2000/svg";
 const D2R = Math.PI / 180;
 const SNAP_M = 1.6;      // snap window points to a footprint wall within this many metres
+const CORNER_SNAP_M = 0.1; // snap dragged floor (wall) corners onto the footprint outline within this many metres
 const HIT_PX = 11;       // pointer hit-tolerance for handles, in screen pixels
 const DRAG_PX = 3;       // movement beyond this counts as a drag, not a click
 const VB = 640;          // svg viewBox size (square, world units)
@@ -103,7 +108,8 @@ class SunBeamsPanel extends HTMLElement {
     this._entries = [];
     this._entryId = null;
     this._geom = null;      // {footprint, origin, floor, windows}
-    this._tool = "floor";
+    this._tool = "select";  // default: look around (no click-to-add)
+    this._undoStack = [];    // snapshots of {floor, windows} for undo
     this._pending = null;   // first click of a new window
     this._dirty = false;
     this._status = "";
@@ -152,8 +158,10 @@ class SunBeamsPanel extends HTMLElement {
       };
       this._dirty = false;
       this._status = "";
+      this._undoStack = [];
     } catch (e) {
       this._geom = { footprint: [], origin: {}, floor: [], windows: [] };
+      this._undoStack = [];
       this._status = "Failed to load: " + (e.message || e);
     }
   }
@@ -450,7 +458,8 @@ class SunBeamsPanel extends HTMLElement {
     barLbl.textContent = fmtLen(barM);
     kids.push(barLbl);
 
-    const s = svgEl("svg", { viewBox: `0 0 ${tf.W} ${tf.H}` }, kids);
+    const s = svgEl("svg", { viewBox: `0 0 ${tf.W} ${tf.H}`,
+      style: `cursor:${this._tool === "select" ? "default" : "crosshair"}` }, kids);
     this._stage.innerHTML = "";
     this._stage.appendChild(s);
   }
@@ -535,6 +544,7 @@ class SunBeamsPanel extends HTMLElement {
       this._ptr.moved = true;
     }
     if (this._drag && this._ptr.moved) {
+      if (!this._ptr.undoPushed) { this._pushUndo(); this._ptr.undoPushed = true; }
       const m = this._ptr.tf.toM(...this._clientToViewbox(e.clientX, e.clientY, this._ptr.tf, this._ptr.rect));
       this._applyDrag(m);
       this._renderStage(this._ptr.tf); // frozen transform: no rescale mid-drag
@@ -578,7 +588,10 @@ class SunBeamsPanel extends HTMLElement {
   _applyDrag(m) {
     const g = this._geom, d = this._drag;
     if (d.kind === "floor") {
-      g.floor[d.idx] = [r2(m[0]), r2(m[1])];
+      let p = [m[0], m[1]];
+      const snap = nearestOnPolygon(p, g.footprint);   // lock wall corners onto the building outline
+      if (snap && snap.d <= CORNER_SNAP_M) p = [snap.pt[0], snap.pt[1]];
+      g.floor[d.idx] = [r2(p[0]), r2(p[1])];
     } else if (d.kind === "win-end") {
       let p = [m[0], m[1]];
       const snap = nearestOnPolygon(p, g.footprint);
@@ -598,9 +611,11 @@ class SunBeamsPanel extends HTMLElement {
 
   _onClickAdd(m) {
     const g = this._geom;
+    if (this._tool === "select") return;   // look-around: no click-to-add
     if (this._tool === "floor") {
       let p = [m[0], m[1]];
       if (this._shift && g.floor.length >= 1) p = this._applyLock(g.floor[g.floor.length - 1], p);
+      this._pushUndo();
       g.floor.push([r2(p[0]), r2(p[1])]);
       this._markDirty();
     } else if (this._tool === "window") {
@@ -614,6 +629,7 @@ class SunBeamsPanel extends HTMLElement {
       if (!this._pending) {
         this._pending = p;
       } else {
+        this._pushUndo();
         const n = g.windows.length + 1;
         const w = {
           id: "w" + n + "_" + Date.now().toString(36), name: "Window " + n,
@@ -637,9 +653,10 @@ class SunBeamsPanel extends HTMLElement {
     this._side.innerHTML = `
       <h2>Tools</h2>
       <div class="sb-tools">
+        <button data-tool="select" class="${this._tool === "select" ? "active" : ""}">Look around</button>
         <button data-tool="floor" class="${this._tool === "floor" ? "active" : ""}">Draw floor</button>
         <button data-tool="window" class="${this._tool === "window" ? "active" : ""}">Add window</button>
-        <button data-act="undo">Undo</button>
+        <button data-act="undo" ${this._undoStack.length || this._pending ? "" : "disabled"}>Undo</button>
         <button data-act="clearfloor">Clear floor</button>
       </div>
       <h2>View</h2>
@@ -648,10 +665,12 @@ class SunBeamsPanel extends HTMLElement {
         <button data-act="zoomin" title="Zoom in">＋</button>
         <button data-act="resetview">Reset view</button>
       </div>
-      <p class="instr">${this._tool === "floor"
+      <p class="instr">${this._tool === "select"
+        ? "Drag any wall corner, window end, or window to adjust. Wall corners snap onto the building outline within 0.1 m. Undo reverts the last move."
+        : this._tool === "floor"
         ? "Click to add floor corners. Drag any corner, window end, or window to adjust. Beams land on this floor."
         : "Click two points on a wall to place a window (snaps to the outline). Drag any corner, window end, or window to adjust."}
-        <br>Hold <b>Shift</b> to lock the segment along the wall or square to it (90°).
+        ${this._tool === "select" ? "" : "<br>Hold <b>Shift</b> to lock the segment along the wall or square to it (90°)."}
         <br>Scroll to zoom about the cursor; drag empty space to pan. Lengths are in metres.</p>
       <h2>Windows (${(g.windows || []).length})</h2>
       <div class="wlist" id="sb-wlist"></div>
@@ -673,7 +692,7 @@ class SunBeamsPanel extends HTMLElement {
       b.addEventListener("click", () => { this._tool = b.dataset.tool; this._pending = null; this._renderStage(); this._renderSide(); }));
     this._side.querySelector('[data-act="undo"]').addEventListener("click", () => this._undo());
     this._side.querySelector('[data-act="clearfloor"]').addEventListener("click", () => {
-      if (g.floor.length) { g.floor = []; this._markDirty(); this._renderStage(); this._renderSide(); }
+      if (g.floor.length) { this._pushUndo(); g.floor = []; this._markDirty(); this._renderStage(); this._renderSide(); }
     });
     this._side.querySelector('[data-act="zoomin"]').addEventListener("click", () => this._zoomAbout(ZOOM_STEP, VB / 2, VB / 2));
     this._side.querySelector('[data-act="zoomout"]').addEventListener("click", () => this._zoomAbout(1 / ZOOM_STEP, VB / 2, VB / 2));
@@ -687,17 +706,27 @@ class SunBeamsPanel extends HTMLElement {
         this._side.querySelector("#sb-save").disabled = false;
       }));
     wl.querySelectorAll("button[data-del]").forEach((b) =>
-      b.addEventListener("click", () => { g.windows.splice(+b.dataset.del, 1); this._markDirty(); this._renderStage(); this._renderSide(); }));
+      b.addEventListener("click", () => { this._pushUndo(); g.windows.splice(+b.dataset.del, 1); this._markDirty(); this._renderStage(); this._renderSide(); }));
     this._side.querySelector("#sb-save").addEventListener("click", () => this._save());
   }
 
-  _undo() {
+  // snapshot the mutable geometry (floor + windows) before a change, for undo
+  _pushUndo() {
     const g = this._geom;
-    if (this._tool === "floor" && g.floor.length) g.floor.pop();
-    else if (this._tool === "window") {
-      if (this._pending) this._pending = null;
-      else if (g.windows.length) g.windows.pop();
-    }
+    this._undoStack.push({
+      floor: g.floor.map((p) => [p[0], p[1]]),
+      windows: g.windows.map((w) => ({ ...w })),
+    });
+    if (this._undoStack.length > 100) this._undoStack.shift();
+  }
+
+  _undo() {
+    // an in-progress window (one point placed) undoes to nothing on the stack
+    if (this._pending) { this._pending = null; this._renderStage(); this._renderSide(); return; }
+    if (!this._undoStack.length) return;
+    const s = this._undoStack.pop();
+    this._geom.floor = s.floor.map((p) => [p[0], p[1]]);
+    this._geom.windows = s.windows.map((w) => ({ ...w }));
     this._markDirty();
     this._renderStage();
     this._renderSide();
@@ -721,4 +750,4 @@ class SunBeamsPanel extends HTMLElement {
 }
 
 customElements.define("sun-beams-panel", SunBeamsPanel);
-console.info("%c SUN-BEAMS-PANEL %c 0.5.0 ", "background:#ff9800;color:#000", "");
+console.info("%c SUN-BEAMS-PANEL %c 0.6.0 ", "background:#ff9800;color:#000", "");
