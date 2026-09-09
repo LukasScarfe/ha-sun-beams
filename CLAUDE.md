@@ -160,7 +160,10 @@ card shouldn't also be a setup tool, and HA config-flow forms can't host a drawi
   wall within `SNAP_M`; azimuth from `segmentOutwardAzimuth`), rename/delete windows, and **Save**
   via `sun_beams/save_geometry` (reloads the entry, rebuilds the sensor set). Three tools: **Look
   around** (default — no click-to-add, just pan/zoom and drag handles), **Draw floor**, **Add
-  window**; dragging handles works under any tool. Dragging a floor (wall) corner snaps it onto the
+  window**; dragging handles works under any tool. In **Draw floor**, clicking empty space extends
+  the wall chain, but clicking *on an existing wall* inserts a corner there (splits the edge via
+  `_hitFloorEdge` → `floor.splice`; a hollow dot previews the insertion point, projected onto the
+  wall). Dragging a floor (wall) corner snaps it onto the
   footprint outline within `CORNER_SNAP_M` (0.1 m). **Undo** is snapshot-based (`_pushUndo` stacks
   `{floor, windows}` before each add/delete/clear/drag) so it reverts a moved corner to its previous
   position, not just the last placed point. HA sets `.hass` on the

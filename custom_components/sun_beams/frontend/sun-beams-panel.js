@@ -9,7 +9,8 @@
  * Interaction:
  *   - Look around tool (default) : no click-to-add; just pan/zoom and drag
  *     handles. Wall (floor) corners snap onto the building outline within 0.1 m.
- *   - Draw floor tool : click to add interior-floor corners.
+ *   - Draw floor tool : click empty space to extend the wall chain, or click on
+ *     an existing wall to insert a corner there (a hollow dot previews where).
  *   - Add window tool : click two points on a wall to place a window.
  *   - Drag (any tool) : floor corners, window endpoints, and whole windows are
  *     draggable handles. Endpoint drags snap to the nearest building wall; a
@@ -422,8 +423,19 @@ class SunBeamsPanel extends HTMLElement {
       const [x, y] = tf.toXY(this._pending[0], this._pending[1]);
       kids.push(svgEl("circle", { cx: x, cy: y, r: 5, fill: "var(--error-color,#e53935)" }, []));
     }
-    // live ruler: rubber-band from the last placed point to the cursor
-    if (this._hoverM && this._rubberActive() && !this._ptr) {
+    // live ruler: rubber-band from the last placed point to the cursor — but in
+    // Draw-floor mode hovering over an existing wall, show an insertion marker
+    // (a hollow dot on the wall) instead: the click will splice a corner there.
+    const insHover = (this._hoverM && this._tool === "floor" && !this._ptr)
+      ? this._hitFloorEdge(this._hoverM) : null;
+    if (insHover) {
+      const [ix, iy] = tf.toXY(insHover.pt[0], insHover.pt[1]);
+      kids.push(svgEl("circle", {
+        cx: ix, cy: iy, r: 5, fill: "var(--card-background-color,#fff)",
+        stroke: "var(--primary-color,#03a9f4)", "stroke-width": 2,
+        style: "pointer-events:none",
+      }, []));
+    } else if (this._hoverM && this._rubberActive() && !this._ptr) {
       let anchor, to = this._hoverM;
       anchor = this._tool === "window" ? this._pending : g.floor[g.floor.length - 1];
       if (this._shift) {
@@ -501,6 +513,32 @@ class SunBeamsPanel extends HTMLElement {
       if (distToSeg(cx, cy, a[0], a[1], b[0], b[1]) <= HIT_PX) return { kind: "win-body", wi: i };
     }
     return null;
+  }
+
+  // In Draw-floor mode, find the floor edge (wall) a metre-point `m` lands on so
+  // a new corner can be *inserted* there instead of appended to the chain end.
+  // Returns { i, pt } — insert after floor[i]; pt is the click projected onto
+  // the wall so the new corner starts collinear — or null if not near any edge.
+  _hitFloorEdge(m) {
+    const g = this._geom, tf = this._stageTf, rect = this._svgRect();
+    if (!tf || !rect || !g.floor || g.floor.length < 2) return null;
+    const n = g.floor.length, nEdges = n >= 3 ? n : n - 1;
+    const c = this._screenOf(m, tf, rect);
+    let best = null, bestD = HIT_PX;
+    for (let i = 0; i < nEdges; i++) {
+      const a = g.floor[i], b = g.floor[(i + 1) % n];
+      const as = this._screenOf(a, tf, rect), bs = this._screenOf(b, tf, rect);
+      const d = distToSeg(c[0], c[1], as[0], as[1], bs[0], bs[1]);
+      if (d < bestD) {
+        bestD = d;
+        const vx = b[0] - a[0], vy = b[1] - a[1];
+        const len2 = vx * vx + vy * vy;
+        let t = len2 ? ((m[0] - a[0]) * vx + (m[1] - a[1]) * vy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        best = { i, pt: [a[0] + t * vx, a[1] + t * vy] };
+      }
+    }
+    return best;
   }
 
   // idle cursor tracking (no button) → live ruler rubber-band
@@ -613,11 +651,19 @@ class SunBeamsPanel extends HTMLElement {
     const g = this._geom;
     if (this._tool === "select") return;   // look-around: no click-to-add
     if (this._tool === "floor") {
-      let p = [m[0], m[1]];
-      if (this._shift && g.floor.length >= 1) p = this._applyLock(g.floor[g.floor.length - 1], p);
-      this._pushUndo();
-      g.floor.push([r2(p[0]), r2(p[1])]);
-      this._markDirty();
+      const ins = this._hitFloorEdge(m);
+      if (ins) {
+        // click landed on an existing wall → split it (insert a corner there)
+        this._pushUndo();
+        g.floor.splice(ins.i + 1, 0, [r2(ins.pt[0]), r2(ins.pt[1])]);
+        this._markDirty();
+      } else {
+        let p = [m[0], m[1]];
+        if (this._shift && g.floor.length >= 1) p = this._applyLock(g.floor[g.floor.length - 1], p);
+        this._pushUndo();
+        g.floor.push([r2(p[0]), r2(p[1])]);
+        this._markDirty();
+      }
     } else if (this._tool === "window") {
       let p = [m[0], m[1]];
       if (this._pending && this._shift) {
