@@ -124,6 +124,8 @@ class SunBeamsCard extends HTMLElement {
       svg { width: 100%; height: auto; display: block; }
       .hint { font-size: 12px; color: var(--secondary-text-color,#666); margin-top: 6px; }
       .cloud { margin-top: 4px; }
+      .cloud-plot + .cloud-plot { margin-top: 10px; padding-top: 6px;
+                                  border-top: 1px solid var(--divider-color,#8883); }
       .cloud-title { font-size: 12px; color: var(--secondary-text-color,#888);
                      margin: 6px 2px 2px; display: flex; justify-content: space-between; }
     `;
@@ -203,6 +205,38 @@ class SunBeamsCard extends HTMLElement {
       if (a && a.beam !== undefined && a.window_azimuth === win.azimuth) return states[eid];
     }
     return null;
+  }
+
+  // The illuminance sensor for a window (no `beam` attr, unit lx). Same id/azimuth
+  // matching as _windowSensor. Used only when the card shows lux/fc.
+  _windowLuxSensor(win) {
+    const states = this._hass.states;
+    const isLux = (a) => a && a.beam === undefined &&
+      (a.device_class === "illuminance" || a.unit_of_measurement === "lx");
+    for (const eid in states) {
+      if (!eid.startsWith("sensor.")) continue;
+      const a = states[eid].attributes;
+      if (isLux(a) && a.window_id === win.id) return states[eid];
+    }
+    for (const eid in states) {
+      if (!eid.startsWith("sensor.")) continue;
+      const a = states[eid].attributes;
+      if (isLux(a) && a.window_azimuth === win.azimuth) return states[eid];
+    }
+    return null;
+  }
+
+  // Per-window label text honouring the window_units config: W/m² (default),
+  // lux, or foot-candles. lux/fc read the illuminance sensor (which uses the
+  // configured luminous efficacy); falls back to W/m² if there's no lux entity.
+  _windowLabel(win, irr) {
+    const units = this._config.window_units || "wm2";
+    if (units === "wm2") return `${Math.round(irr)} W/m²`;
+    const st = this._windowLuxSensor(win);
+    const lux = st ? Number(st.state) : NaN;
+    if (!isFinite(lux)) return `${Math.round(irr)} W/m²`;
+    if (units === "fc") return `${Math.round(lux / 10.7639)} fc`;
+    return `${Math.round(lux)} lx`;
   }
 
   _render() {
@@ -304,7 +338,7 @@ class SunBeamsCard extends HTMLElement {
           x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 8, "text-anchor": "middle",
           "font-size": 11, fill: "var(--primary-text-color,#333)",
         }, []);
-        lbl.textContent = `${Math.round(irr)} W/m²`;
+        lbl.textContent = this._windowLabel(w, irr);
         kids.push(lbl);
       }
     }
@@ -353,8 +387,19 @@ class SunBeamsCard extends HTMLElement {
     return { past, future };
   }
 
-  // Cloud cover comes straight from Open-Meteo in the browser (CORS-enabled, no
-  // key) using the building's projection origin — keeping it client-side lets the
+  // Series to fetch + plot, one stacked chart each. cloud_cover is a coverage %
+  // (a poor light proxy — thin cirrus reads high but passes most light); the
+  // irradiance series are the real "how much light" measures and auto-scale.
+  // DNI (direct beam) is what captures the "feels like direct sun" effect.
+  _plotSpecs() {
+    return [
+      { key: "shortwave_radiation", label: "Total irradiance (GHI)", icon: "🔆", unit: "W/m²",
+        color: "var(--warning-color,#ff9800)" },
+    ];
+  }
+
+  // Data comes straight from Open-Meteo in the browser (CORS-enabled, no key)
+  // using the building's projection origin — keeping it client-side lets the
   // time window be tuned per-card without touching the coordinator. unixtime so
   // "now" is trivial to place regardless of the building's timezone.
   _maybeFetchCloud() {
@@ -367,13 +412,20 @@ class SunBeamsCard extends HTMLElement {
     this._cloudLoading = key;
     const pastDays = Math.min(92, Math.max(0, Math.ceil((past + 1) / 24)));
     const fcDays = Math.min(16, Math.max(1, Math.ceil((future + 1) / 24)));
+    const hourly = this._plotSpecs().map((s) => s.key).join(",");
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${o.lat}&longitude=${o.lon}` +
-      `&hourly=cloud_cover&past_days=${pastDays}&forecast_days=${fcDays}&timeformat=unixtime&timezone=auto`;
+      `&hourly=${hourly}&past_days=${pastDays}&forecast_days=${fcDays}&timeformat=unixtime&timezone=auto`;
     fetch(url)
       .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then((j) => {
         const h = j && j.hourly;
-        this._cloud = h && h.time ? { time: h.time, cloud: h.cloud_cover } : null;
+        if (h && h.time) {
+          const data = {};
+          for (const s of this._plotSpecs()) data[s.key] = h[s.key] || [];
+          this._cloud = { time: h.time, data };
+        } else {
+          this._cloud = null;
+        }
         this._cloudKey = key; this._cloudAt = Date.now(); this._cloudLoading = null; this._cloudErr = null;
         this._renderCloud();
       })
@@ -391,46 +443,67 @@ class SunBeamsCard extends HTMLElement {
       if (this._cloudErr) {
         const d = document.createElement("div");
         d.className = "hint";
-        d.textContent = "⚠ cloud data: " + this._cloudErr;
+        d.textContent = "⚠ weather data: " + this._cloudErr;
         host.appendChild(d);
       }
       return;
     }
+    for (const spec of this._plotSpecs()) this._plotSeries(host, spec);
+  }
 
+  // "Nice" round axis max at or above v (100/200/250/500/1000 … pattern).
+  _niceMax(v) {
+    if (!(v > 0)) return 1;
+    const pow = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * pow >= v) return m * pow;
+    return 10 * pow;
+  }
+
+  _plotSeries(host, spec) {
+    const c = this._cloud;
+    const vals = c.data[spec.key] || [];
     const { past, future } = this._cloudHours();
     const now = Date.now() / 1000;
     const t0 = now - past * 3600, t1 = now + future * 3600;
     const idx = [];
     for (let i = 0; i < c.time.length; i++) {
-      if (c.time[i] >= t0 && c.time[i] <= t1 && c.cloud[i] != null) idx.push(i);
+      if (c.time[i] >= t0 && c.time[i] <= t1 && vals[i] != null) idx.push(i);
     }
     if (idx.length < 2) return;
 
-    const W = 600, H = 150, mL = 30, mR = 8, mT = 8, mB = 20;
-    const px = (t) => mL + ((t - t0) / (t1 - t0)) * (W - mL - mR);
-    const py = (v) => mT + (1 - v / 100) * (H - mT - mB);
+    let dataMax = 0;
+    for (const i of idx) dataMax = Math.max(dataMax, Number(vals[i]) || 0);
+    const vMax = spec.fixedMax != null ? spec.fixedMax : this._niceMax(dataMax);
 
+    const W = 600, H = 150, mL = 34, mR = 8, mT = 8, mB = 20;
+    const px = (t) => mL + ((t - t0) / (t1 - t0)) * (W - mL - mR);
+    const py = (v) => mT + (1 - v / vMax) * (H - mT - mB);
+    const fmt = (v) => spec.unit === "%" ? Math.round(v) : Math.round(v);
+
+    const wrap = document.createElement("div");
+    wrap.className = "cloud-plot";
     const title = document.createElement("div");
     title.className = "cloud-title";
     const past_l = past >= 48 ? `${Math.round(past / 24)} d` : `${past} h`;
     const fut_l = future >= 48 ? `${Math.round(future / 24)} d` : `${future} h`;
     let nowI = idx[0];
     for (const i of idx) if (Math.abs(c.time[i] - now) < Math.abs(c.time[nowI] - now)) nowI = i;
-    title.innerHTML = `<span>☁ Cloud cover — past ${past_l} · next ${fut_l}</span>` +
-      `<span>${Math.round(Number(c.cloud[nowI] ?? 0))}% now</span>`;
-    host.appendChild(title);
+    title.innerHTML = `<span>${spec.icon} ${spec.label} — past ${past_l} · next ${fut_l}</span>` +
+      `<span>${fmt(Number(vals[nowI] ?? 0))} ${spec.unit} now</span>`;
+    wrap.appendChild(title);
 
+    const gradId = "sb-fill-" + spec.key;
     const kids = [];
     const defs = svg("defs", {}, []);
     defs.innerHTML = `
-      <linearGradient id="sb-cloudfill" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stop-color="var(--primary-color,#03a9f4)" stop-opacity="0.35"/>
-        <stop offset="1" stop-color="var(--primary-color,#03a9f4)" stop-opacity="0.03"/>
+      <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="${spec.color}" stop-opacity="0.35"/>
+        <stop offset="1" stop-color="${spec.color}" stop-opacity="0.03"/>
       </linearGradient>`;
     kids.push(defs);
 
-    // gridlines at 0/50/100 %
-    for (const v of [0, 50, 100]) {
+    // gridlines at 0 / mid / max
+    for (const v of [0, vMax / 2, vMax]) {
       const y = py(v);
       kids.push(svg("line", {
         x1: mL, y1: y, x2: W - mR, y2: y,
@@ -440,18 +513,18 @@ class SunBeamsCard extends HTMLElement {
         x: mL - 4, y: y + 3, "text-anchor": "end", "font-size": 9,
         fill: "var(--secondary-text-color,#888)",
       }, []);
-      lbl.textContent = v + "%";
+      lbl.textContent = fmt(v) + (spec.unit === "%" ? "%" : "");
       kids.push(lbl);
     }
 
     // area + line
-    const line = idx.map((i) => `${px(c.time[i]).toFixed(1)},${py(c.cloud[i]).toFixed(1)}`);
+    const line = idx.map((i) => `${px(c.time[i]).toFixed(1)},${py(vals[i]).toFixed(1)}`);
     const area = `M${px(c.time[idx[0]]).toFixed(1)},${py(0).toFixed(1)} L` +
       line.join(" L") + ` L${px(c.time[idx[idx.length - 1]]).toFixed(1)},${py(0).toFixed(1)} Z`;
-    kids.push(svg("path", { d: area, fill: "url(#sb-cloudfill)", stroke: "none" }, []));
+    kids.push(svg("path", { d: area, fill: `url(#${gradId})`, stroke: "none" }, []));
     kids.push(svg("path", {
       d: "M" + line.join(" L"), fill: "none",
-      stroke: "var(--primary-color,#03a9f4)", "stroke-width": 1.8, "stroke-linejoin": "round",
+      stroke: spec.color, "stroke-width": 1.8, "stroke-linejoin": "round",
     }, []));
 
     // "now" divider between historic and predicted
@@ -483,7 +556,8 @@ class SunBeamsCard extends HTMLElement {
     }
 
     const chart = svg("svg", { viewBox: `0 0 ${W} ${H}` }, kids);
-    host.appendChild(chart);
+    wrap.appendChild(chart);
+    host.appendChild(wrap);
   }
 
   static getConfigElement() {
@@ -491,7 +565,7 @@ class SunBeamsCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { type: "custom:sun-beams-card", entry_id: "", title: "Sun Beams", cloud_past_hours: 24, cloud_future_hours: 24 };
+    return { type: "custom:sun-beams-card", entry_id: "", title: "Sun Beams", window_units: "wm2", cloud_past_hours: 24, cloud_future_hours: 24 };
   }
 }
 
@@ -541,13 +615,20 @@ class SunBeamsCardEditor extends HTMLElement {
         <input id="sb-title" type="text" value="${this._config.title || ""}"
                style="display:block;width:100%;margin-top:4px;">
       </label>
+      <label style="display:block;margin-bottom:8px;">Window value units
+        <select id="sb-units" style="display:block;width:100%;margin-top:4px;">
+          ${[["wm2", "Irradiance (W/m²)"], ["lux", "Illuminance (lux)"], ["fc", "Illuminance (foot-candles)"]]
+            .map(([v, l]) => `<option value="${v}" ${(this._config.window_units || "wm2") === v ? "selected" : ""}>${l}</option>`)
+            .join("")}
+        </select>
+      </label>
       <div style="display:flex;gap:12px;">
-        <label style="flex:1;">Cloud history (hours)
+        <label style="flex:1;">Plot history (hours)
           <input id="sb-past" type="number" min="0" max="2160" step="1"
                  value="${this._config.cloud_past_hours ?? 24}"
                  style="display:block;width:100%;margin-top:4px;">
         </label>
-        <label style="flex:1;">Cloud forecast (hours)
+        <label style="flex:1;">Plot forecast (hours)
           <input id="sb-future" type="number" min="0" max="360" step="1"
                  value="${this._config.cloud_future_hours ?? 24}"
                  style="display:block;width:100%;margin-top:4px;">
@@ -561,6 +642,9 @@ class SunBeamsCardEditor extends HTMLElement {
     });
     wrap.querySelector("#sb-title").addEventListener("input", (e) => {
       this._config.title = e.target.value; this._emit();
+    });
+    wrap.querySelector("#sb-units").addEventListener("change", (e) => {
+      this._config.window_units = e.target.value; this._emit();
     });
     wrap.querySelector("#sb-past").addEventListener("input", (e) => {
       this._config.cloud_past_hours = Number(e.target.value); this._emit();

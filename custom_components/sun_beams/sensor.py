@@ -170,3 +170,12 @@ class WindowLuxSensor(_WindowBase):
     def native_value(self) -> float | None:
         poa = self._poa(self._albedo)
         return None if poa is None else round(solar.estimate_lux(poa.total, self._efficacy))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        # window_id/azimuth let the card match this lux entity to its window
+        # (same matching rules as the irradiance sensor).
+        return {
+            "window_id": self._window.get(WIN_ID),
+            "window_azimuth": self._win_az,
+        }

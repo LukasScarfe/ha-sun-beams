@@ -141,12 +141,19 @@ card shouldn't also be a setup tool, and HA config-flow forms can't host a drawi
   sun/irradiance from `hass.states`, renders the SVG plan (**floorplan walls only** once a floor is
   drawn — the whole-building footprint shows *only* as a fallback before any floor exists; the plan
   also frames/zooms on the floor in that case), glowing windows, beams, sun compass. Matches a
-  window to its sensor by `attributes.window_id` (azimuth fallback). Below the plan it draws a
-  **cloud-cover plot** (historic + forecast, `now` divider): fetched **client-side straight from
-  Open-Meteo** (`hourly=cloud_cover`, `timeformat=unixtime`, CORS-enabled, no key) using
-  `geometry.origin` lat/lon, cached 15 min. The window is customizable per-card via
-  `cloud_past_hours` / `cloud_future_hours` config (default 24/24). Its config editor picks the
-  config entry, a title, and those two hour fields.
+  window to its sensor by `attributes.window_id` (azimuth fallback). Per-window value **labels**
+  honour the `window_units` config — `wm2` (default, the irradiance sensor's W/m²), `lux`, or `fc`
+  (foot-candles); lux/fc read the window's *illuminance* sensor (`_windowLuxSensor`, same
+  id/azimuth match) so they track the configured luminous efficacy, and fall back to W/m² if no lux
+  entity exists. Glow intensity is always irradiance, independent of the label unit. Below the plan
+  it draws **stacked timeline plots** (historic + forecast, `now` divider), one per entry in
+  `_plotSpecs()` — currently just **GHI** (`shortwave_radiation`, W/m², auto-scaled): fetched
+  **client-side straight from Open-Meteo** (`hourly=<spec keys>`, `timeformat=unixtime`,
+  CORS-enabled, no key) using `geometry.origin` lat/lon, cached 15 min. Irradiance is the honest
+  "incoming light" measure (cloud *optical depth* baked in) — cloud-cover % was dropped as a proxy
+  (thin cirrus reads high but passes light). Window is per-card via `cloud_past_hours` /
+  `cloud_future_hours` (default 24/24; keys kept for back-compat). Config editor picks the config
+  entry, title, `window_units`, and those two hour fields.
 - **`sun-beams-panel.js`** — the editor. A full-page custom element registered as a sidebar panel
   by `frontend.py` via `panel_custom.async_register_panel` (admin-only, URL `/sun-beams`). Loads
   the OSM footprint, lets you draw the floor and drop windows (clicks snap to the nearest footprint
@@ -190,7 +197,7 @@ Bump `manifest.json` `version` on every released change (HACS keys updates off i
   window if accuracy matters. Beam-vs-diffuse have different efficacy.
 - **Beams** are a geometric projection (direction + reach), not a photometric floor-exposure sim.
 - **Sky model** is isotropic (no Perez circumsolar/horizon brightening).
-- **Forecast/timeline** — coordinator only fetches `current` (the card's cloud plot fetches hourly
+- **Forecast/timeline** — coordinator only fetches `current` (the card's GHI plot fetches hourly
   itself, client-side). Pulling hourly *irradiance* server-side would enable a "sun through the day"
   scrubber and predictive automations.
 - **Multiple buildings** — supported by the entry unique-id (lat,lon) but untested with >1 entry.
