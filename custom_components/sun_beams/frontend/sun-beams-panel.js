@@ -151,7 +151,11 @@ class SunBeamsPanel extends HTMLElement {
     try {
       const res = await this._hass.callWS({ type: "sun_beams/get_geometry", entry_id: this._entryId });
       const g = res.geometry || {};
+      // Spread first so fields the panel doesn't edit (building_height,
+      // obstructions, osm_way_id) round-trip untouched through Save; then
+      // override the arrays the editor actually mutates with fresh copies.
       this._geom = {
+        ...g,
         footprint: g.footprint || [],
         origin: g.origin || {},
         floor: (g.floor || []).map((p) => [p[0], p[1]]),
@@ -711,6 +715,13 @@ class SunBeamsPanel extends HTMLElement {
         <button data-act="zoomin" title="Zoom in">＋</button>
         <button data-act="resetview">Reset view</button>
       </div>
+      <h2>Surroundings</h2>
+      <div class="sb-tools">
+        <button data-act="refresh">Refresh from OSM</button>
+      </div>
+      <p class="instr">Loads neighbouring buildings + heights so windows can be shadowed by them
+        (and by this building's own shape). <b>${(g.obstructions || []).length}</b> loaded${
+          g.building_height ? `, this building ${g.building_height} m` : ""}. Click <b>Save</b> after refreshing.</p>
       <p class="instr">${this._tool === "select"
         ? "Drag any wall corner, window end, or window to adjust. Wall corners snap onto the building outline within 0.1 m. Undo reverts the last move."
         : this._tool === "floor"
@@ -743,6 +754,7 @@ class SunBeamsPanel extends HTMLElement {
     this._side.querySelector('[data-act="zoomin"]').addEventListener("click", () => this._zoomAbout(ZOOM_STEP, VB / 2, VB / 2));
     this._side.querySelector('[data-act="zoomout"]').addEventListener("click", () => this._zoomAbout(1 / ZOOM_STEP, VB / 2, VB / 2));
     this._side.querySelector('[data-act="resetview"]').addEventListener("click", () => { this._view = null; this._renderStage(); });
+    this._side.querySelector('[data-act="refresh"]').addEventListener("click", () => this._refresh());
     wl.querySelectorAll("input[data-i]").forEach((inp) =>
       inp.addEventListener("input", (e) => {
         g.windows[+e.target.dataset.i].name = e.target.value;
@@ -778,6 +790,27 @@ class SunBeamsPanel extends HTMLElement {
     this._renderSide();
   }
 
+  // Fetch neighbour buildings + heights from OSM (about the entry's existing
+  // origin) and merge them into the in-memory geometry, then mark dirty so the
+  // normal Save persists them. Fetch-only server-side: no reload, so this never
+  // clobbers an in-progress drawing.
+  async _refresh() {
+    const status = this._side.querySelector("#sb-status");
+    status.textContent = "Fetching surroundings from OSM…"; status.classList.remove("dirty");
+    try {
+      const res = await this._hass.callWS({ type: "sun_beams/refresh_geometry", entry_id: this._entryId });
+      this._geom.obstructions = res.obstructions || [];
+      this._geom.building_height = res.building_height;
+      this._markDirty();
+      this._status = `Loaded ${this._geom.obstructions.length} neighbour building(s); ` +
+        `this building ${res.building_height} m. Click Save to apply.`;
+      this._renderSide();
+    } catch (e) {
+      this._status = "Refresh failed: " + (e.message || e);
+      status.textContent = this._status; status.classList.add("dirty");
+    }
+  }
+
   async _save() {
     const btn = this._side.querySelector("#sb-save");
     const status = this._side.querySelector("#sb-status");
@@ -796,4 +829,4 @@ class SunBeamsPanel extends HTMLElement {
 }
 
 customElements.define("sun-beams-panel", SunBeamsPanel);
-console.info("%c SUN-BEAMS-PANEL %c 0.6.0 ", "background:#ff9800;color:#000", "");
+console.info("%c SUN-BEAMS-PANEL %c 0.8.0 ", "background:#ff9800;color:#000", "");

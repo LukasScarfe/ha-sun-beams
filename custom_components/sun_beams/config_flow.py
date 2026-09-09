@@ -23,10 +23,13 @@ from .const import (
     CONF_LONGITUDE,
     CONF_OSM_WAY,
     DEFAULT_ALBEDO,
+    DEFAULT_BUILDING_HEIGHT_M,
     DEFAULT_EFFICACY,
     DOMAIN,
+    GEO_BUILDING_HEIGHT,
     GEO_FLOOR,
     GEO_FOOTPRINT,
+    GEO_OBSTRUCTIONS,
     GEO_ORIGIN,
     GEO_WINDOWS,
 )
@@ -55,6 +58,8 @@ class SunBeamsConfigFlow(ConfigFlow, domain=DOMAIN):
                 GEO_ORIGIN: osm["origin"] if osm else {"lat": lat, "lon": lon},
                 GEO_FLOOR: [],
                 GEO_WINDOWS: [],
+                GEO_BUILDING_HEIGHT: osm["building_height"] if osm else DEFAULT_BUILDING_HEIGHT_M,
+                GEO_OBSTRUCTIONS: osm["obstructions"] if osm else [],
             }
             data = {
                 CONF_LATITUDE: lat,

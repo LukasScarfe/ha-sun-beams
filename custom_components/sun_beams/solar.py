@@ -79,21 +79,28 @@ def poa_irradiance(
     surface_azimuth: float,
     surface_tilt: float = VERTICAL_TILT,
     albedo: float = DEFAULT_ALBEDO,
+    shadow: float = 1.0,
 ) -> PoaIrradiance:
     """Total irradiance on an arbitrarily-oriented surface (isotropic sky model).
 
-    beam        = DNI · max(0, cosθ)          (only while the sun is up)
+    beam        = DNI · max(0, cosθ) · shadow (only while the sun is up)
     sky_diffuse = DHI · (1 + cos β) / 2       (isotropic sky view factor)
     ground      = albedo · GHI · (1 − cos β) / 2
+
+    ``shadow`` (0..1) is the fraction of the direct beam that actually reaches the
+    surface, i.e. 1 minus how much of it is blocked by nearby buildings (see
+    ``geometry.beam_shadow_factor``). It scales the beam only — a shadowed window
+    still collects diffuse sky and ground-reflected light.
     """
     dni = max(0.0, dni or 0.0)
     dhi = max(0.0, dhi or 0.0)
     ghi = max(0.0, ghi or 0.0)
+    shadow = max(0.0, min(1.0, shadow))
     beta = math.radians(surface_tilt)
 
     cos_theta = incidence_cos(sun_elevation, sun_azimuth, surface_azimuth, surface_tilt)
     sun_up = sun_elevation > 0.0
-    beam = dni * max(0.0, cos_theta) if sun_up else 0.0
+    beam = dni * max(0.0, cos_theta) * shadow if sun_up else 0.0
 
     sky_diffuse = dhi * (1.0 + math.cos(beta)) / 2.0
     ground = albedo * ghi * (1.0 - math.cos(beta)) / 2.0

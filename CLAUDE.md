@@ -21,7 +21,15 @@ container below.
 
 Validated end-to-end in the dev instance: config flow → OSM footprint → Open-Meteo → per-window
 sensors → WS geometry save → entry reload, all correct. **Not yet deployed to production HA.**
-Version `0.1.0`.
+Version `0.6.0`.
+
+Latest: per-window **beam shadowing** — the direct beam is now blocked when the building's own
+outline (concave/L/U shapes) or a neighbouring building stands between a window and the sun (see
+the shadow model in Physics reference). **Validated live in the dev instance**: after *Refresh from
+OSM* + Save, the SW-afternoon sun (elev 36°, az 228°) correctly gave the shielded south window
+`shadow_factor=0.0` (beam 0), an east window 0.5, and the open south window 1.0. Existing entries
+created before 0.6.0 pick this up via the panel's **Refresh from OSM** button (no re-add needed —
+see Known limitations).
 
 ## Repo layout
 
@@ -30,13 +38,17 @@ custom_components/sun_beams/
   __init__.py       setup/unload; creates coordinator, registers frontend+WS once,
                     forwards sensor platform, reloads entry on options change
   const.py          all keys/URLs/defaults — no magic strings elsewhere
-  solar.py          PURE physics (no HA import). incidence_cos, poa_irradiance, estimate_lux
-  geometry.py       PURE geometry. lat/lon→local metres, edge/segment azimuths, winding
-  osm.py            async Overpass footprint fetch (best-effort; falls back to empty)
+  solar.py          PURE physics (no HA import). incidence_cos, poa_irradiance (shadow-aware),
+                    estimate_lux
+  geometry.py       PURE geometry. lat/lon→local metres, edge/segment azimuths, winding,
+                    beam_shadow_factor (sun-ray occlusion vs. building prisms)
+  osm.py            async Overpass fetch: building footprint + neighbours as shadow casters,
+                    with heights from OSM tags (best-effort; falls back to empty)
   coordinator.py    DataUpdateCoordinator → Open-Meteo current DNI/DHI/GHI + cloud, 900 s
   config_flow.py    user step (lat/lon, OSM seed) + options (albedo, efficacy)
   sensor.py         WindowIrradianceSensor + WindowLuxSensor, one pair per window
-  websocket_api.py  sun_beams/get_geometry, sun_beams/save_geometry
+  websocket_api.py  sun_beams/get_geometry, sun_beams/save_geometry,
+                    sun_beams/refresh_geometry (re-fetch OSM neighbours+heights)
   frontend.py       serves /sun_beams_static, add_extra_js_url (card), registers the panel
   frontend/sun-beams-card.js    DISPLAY-ONLY card — vanilla JS + SVG, NO build step
   frontend/sun-beams-panel.js   the geometry EDITOR — sidebar panel (draw floor, place windows)
@@ -97,12 +109,26 @@ tilt = degrees from horizontal, **90 = vertical window**.
 
 ```
 cosθ  = sin(elev)·cos(β) + cos(elev)·sin(β)·cos(sun_az − surf_az)     # incidence
-beam  = DNI · max(0, cosθ)          (only while elevation > 0)
+beam  = DNI · max(0, cosθ) · shadow (only while elevation > 0)
 sky   = DHI · (1 + cos β) / 2       (isotropic sky view factor)
 ground= albedo · GHI · (1 − cos β)/2
 total = beam + sky + ground         # W/m²
 lux  ≈ total · efficacy             (default 120 lm/W — a single-factor approximation)
 ```
+
+**Shadowing (`geometry.beam_shadow_factor`, used by `sensor.py`).** `shadow` ∈ [0,1] is the
+fraction of the direct beam that actually reaches a window — 1 = clear, 0 = fully blocked. Each
+obstruction (this building's own footprint, for self-shadowing, **plus** every OSM neighbour) is
+treated as a vertical prism of a given height. A horizontal ray is cast from the window's plan
+midpoint toward the sun's azimuth (`sun_direction`); where it crosses a wall at distance `t`, that
+wall shadows the window from the ground up to `S = wall_height − t·tan(elev)`. The window spans
+`0..height` above ground, so `shadow = 1 − clamp(maxS, 0, height)/height` (a smooth partial
+shadow, exact for the vertical-window / vertical-wall model). It scales the **beam only** — a
+shadowed window still gets sky-diffuse + ground-reflected light. Crossings within `SELF_SKIP_M`
+(0.5 m) are ignored so a window never shadows itself with its own wall. Convex footprints can't
+self-shadow (an outward ray never re-crosses them); only concave/L/U/courtyard shapes do.
+Obstructions live in the geometry dict (`building_height`, `obstructions:[{ring,height}]`, same ENU
+origin) so the server sensors and the panel share one source of truth.
 
 DNI = `direct_normal_irradiance`, DHI = `diffuse_radiation`, GHI = `shortwave_radiation` (all from
 Open-Meteo). Test the math offline: `python3 tests/test_solar.py` (11 known-answer cases). Keep
@@ -120,16 +146,25 @@ counter-clockwise. A window is:
 
 Azimuth is derived from the wall a window is dropped on via `segment_outward_azimuth` (picks the
 normal pointing away from the polygon centroid, so winding doesn't matter). The card mirrors these
-helpers in JS — **keep the two in sync** if you change either.
+helpers in JS — **keep the two in sync** if you change either. The shadow helpers
+(`sun_direction`, `ray_segment_distance`, `beam_shadow_factor`) are **server-side only** and have no
+JS mirror — the card gets the result through the sensor's `beam`, so don't duplicate them.
+
+The geometry dict also carries the shadow inputs: `building_height` (this building, metres) and
+`obstructions: [{ring:[[x,y]...], height}]` (neighbours, same ENU origin). Both are seeded from OSM
+at setup and round-trip untouched through the panel's Save (it spreads the loaded geometry, then
+overrides only `floor`/`windows`).
 
 ## Data sources
 
 - **Open-Meteo** — `GET https://api.open-meteo.com/v1/forecast` with
   `current=direct_normal_irradiance,diffuse_radiation,shortwave_radiation,direct_radiation,cloud_cover`.
   No key; snaps to its own weather grid near the coords. Cloud effect is already baked in.
-- **Overpass/OSM** — footprint at setup. **Gotcha:** `overpass-api.de` returns **406** to urllib's
-  default User-Agent — always send a real `User-Agent` (osm.py does). `overpass.kumi.systems` is the
-  fallback mirror. The real 2930 Spruce building is way `327526032`.
+- **Overpass/OSM** — footprint at setup, **plus every other building in the 60 m radius** kept as a
+  shadow-casting `obstruction` (projected about the same origin, tagged with a height from the OSM
+  `height` tag, else `building:levels`×3 m, else a 6 m default). **Gotcha:** `overpass-api.de`
+  returns **406** to urllib's default User-Agent — always send a real `User-Agent` (osm.py does).
+  `overpass.kumi.systems` is the fallback mirror. The real 2930 Spruce building is way `327526032`.
 
 ## Frontend: card + panel (both vanilla JS, no build step / no Lit)
 
@@ -175,7 +210,11 @@ card shouldn't also be a setup tool, and HA config-flow forms can't host a drawi
   points no longer reflows the frame) until **Reset view**. Holding **Shift** while drawing locks the
   new segment (via `_applyLock`) either along the reference wall or square to it (90°), whichever the
   cursor is nearer — reference is the previous floor edge, else the nearest footprint wall; the lock
-  overrides the wall-proximity snap.
+  overrides the wall-proximity snap. A **Surroundings → Refresh from OSM** button fetches neighbour
+  buildings + heights (via `sun_beams/refresh_geometry`, projected about the existing origin) and
+  merges them into the in-memory geometry as `obstructions`/`building_height`, marking the layout
+  dirty; **Save** then persists them and the shadow test picks them up. Fetch-only server-side, so a
+  refresh never clobbers an in-progress drawing.
 
 Both theme through standard HA CSS vars (`--primary-text-color`, `--card-background-color`,
 `--primary-color`, `--accent-color`, …) with hard-coded fallbacks. The geometry helpers in the
@@ -199,7 +238,16 @@ Bump `manifest.json` `version` on every released change (HACS keys updates off i
 - **Illuminance** is one broadband efficacy; calibrate against a real `..._illuminance` sensor near a
   window if accuracy matters. Beam-vs-diffuse have different efficacy.
 - **Beams** are a geometric projection (direction + reach), not a photometric floor-exposure sim.
-- **Sky model** is isotropic (no Perez circumsolar/horizon brightening).
+- **Shadowing** blocks the direct **beam** only (sky-diffuse/ground still arrive — a big obstruction
+  also cuts the diffuse *sky view*, which we don't model). Assumes windows sit at ground level
+  (sill = 0, single-storey) and every obstruction is a flat-topped vertical prism; the neighbour
+  search is the same 60 m radius as the footprint, so a tall building further out won't register.
+  **Config entries created before 0.6.0 have no `obstructions`/`building_height`** and stay
+  unshadowed until populated — hit **Refresh from OSM** in the Sun Beams panel (then **Save**), which
+  fetches neighbours + heights *about the entry's existing origin* (so saved floor/window coords
+  stay valid) and merges them in. No need to remove/re-add the entry. The card needs no change: it
+  reads the sensor's `beam`, so shadowed windows stop glowing and stop casting beams automatically.
+  Neighbours aren't drawn on the card (it frames on the floor).
 - **Forecast/timeline** — coordinator only fetches `current` (the card's GHI plot fetches hourly
   itself, client-side). Pulling hourly *irradiance* server-side would enable a "sun through the day"
   scrubber and predictive automations.

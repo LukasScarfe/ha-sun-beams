@@ -88,6 +88,21 @@ def test_total_is_sum_of_components():
     assert approx(poa.total, poa.beam + poa.sky_diffuse + poa.ground, 1e-9)
 
 
+def test_shadow_scales_beam_only():
+    """A shadow factor of 0.5 halves the beam but leaves diffuse/ground intact."""
+    lit = solar.poa_irradiance(800, 150, 400, 30, 180, 180, albedo=0.2)
+    shaded = solar.poa_irradiance(800, 150, 400, 30, 180, 180, albedo=0.2, shadow=0.5)
+    assert approx(shaded.beam, lit.beam * 0.5, 1e-9)
+    assert approx(shaded.sky_diffuse, lit.sky_diffuse, 1e-9)
+    assert approx(shaded.ground, lit.ground, 1e-9)
+
+
+def test_full_shadow_zeroes_beam_keeps_diffuse():
+    poa = solar.poa_irradiance(800, 150, 400, 30, 180, 180, albedo=0.2, shadow=0.0)
+    assert poa.beam == 0.0
+    assert poa.sky_diffuse > 0 and poa.ground > 0
+
+
 def test_lux_scales_with_efficacy():
     assert approx(solar.estimate_lux(500, efficacy=120), 60000.0)
 

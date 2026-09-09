@@ -17,6 +17,13 @@ GEO_FOOTPRINT = "footprint"         # list[[x, y]] metres, local ENU (x=east, y=
 GEO_FLOOR = "floor"                 # list[[x, y]] metres — interior polygon for beams
 GEO_WINDOWS = "windows"             # list[window dict]
 GEO_ORIGIN = "origin"               # {"lat":, "lon":} the ENU projection origin
+GEO_BUILDING_HEIGHT = "building_height"  # metres — this building's height (self-shadowing)
+GEO_OBSTRUCTIONS = "obstructions"   # list[{"ring":[[x,y]...], "height": m}] neighbours
+                                    # that can shadow windows, same ENU origin
+
+# Shadowing defaults
+DEFAULT_BUILDING_HEIGHT_M = 6.0     # assumed height when OSM has no height/levels tag
+LEVEL_HEIGHT_M = 3.0                # metres per storey for building:levels → height
 
 # window dict keys
 WIN_ID = "id"

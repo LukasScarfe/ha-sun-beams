@@ -85,3 +85,96 @@ def segment_outward_azimuth(p1, p2, polygon_pts):
     ox, oy = mx - cx, my - cy
     nx, ny = max(normals, key=lambda n: n[0] * ox + n[1] * oy)
     return (math.degrees(math.atan2(nx, ny)) + 360.0) % 360.0
+
+
+# --- shadow / occlusion --------------------------------------------------
+#
+# A window only gets DIRECT beam if nothing stands between it and the sun.
+# We model every obstruction (this building's own outline + neighbours) as a
+# vertical prism of a given height and cast a horizontal ray from the window
+# toward the sun's azimuth. Where the ray crosses a wall, that wall shadows the
+# window up to a height that depends on the wall height, the crossing distance
+# and the sun's elevation — see beam_shadow_factor.
+
+# Ignore wall crossings closer than this: a window sits ON its own wall, so its
+# own (and immediately-adjacent) footprint edges would otherwise register a
+# spurious hit at ~0 m. Any real occluding wing/neighbour is metres away.
+SELF_SKIP_M = 0.5
+
+
+def sun_direction(azimuth):
+    """Unit vector (east, north) pointing horizontally TOWARD the sun.
+
+    Azimuth is 0=N, clockwise (90=E, 180=S, 270=W) — HA's convention — so the
+    east component is sin(az) and the north component cos(az)."""
+    a = math.radians(azimuth)
+    return math.sin(a), math.cos(a)
+
+
+def ray_segment_distance(ox, oy, dx, dy, ax, ay, bx, by):
+    """Distance along the ray O + t·D (D a UNIT vector, t in metres) at which it
+    crosses segment A→B, or ``None`` if it doesn't cross ahead of the origin.
+
+    Standard 2-D segment intersection: with p=O, r=D, q=A, s=B−A the crossing is
+    t = (q−p)×s / (r×s), u = (q−p)×r / (r×s), valid for t≥0 and 0≤u≤1."""
+    ex, ey = bx - ax, by - ay
+    rxs = dx * ey - dy * ex
+    if abs(rxs) < 1e-12:
+        return None  # parallel (or degenerate) — treat as no crossing
+    qpx, qpy = ax - ox, ay - oy
+    t = (qpx * ey - qpy * ex) / rxs
+    u = (qpx * dy - qpy * dx) / rxs
+    if t >= 0.0 and 0.0 <= u <= 1.0:
+        return t
+    return None
+
+
+def beam_shadow_factor(
+    win_x,
+    win_y,
+    win_height,
+    sun_azimuth,
+    sun_elevation,
+    obstructions,
+    self_skip_m=SELF_SKIP_M,
+):
+    """Fraction (0..1) of a window's height that the direct sun still reaches.
+
+    1.0 = fully sunlit, 0.0 = fully shadowed, in between = partially shadowed.
+
+    ``obstructions`` is a list of ``{"ring": [[x, y], ...], "height": m}`` — the
+    building's own footprint (for self-shadowing) plus any neighbours, all in the
+    same local ENU metres as the window midpoint (``win_x``, ``win_y``).
+
+    Model: each obstruction is a vertical prism. A wall crossed by the sun-ward
+    ray at horizontal distance ``t`` shadows the window from the ground up to
+    ``S = height − t·tan(elevation)`` metres (the height at which the sightline to
+    the sun clears the wall's top). The window, treated as spanning 0..win_height
+    above the ground, is lit above the tallest such shadow, so the lit fraction is
+    ``1 − clamp(maxS, 0, win_height) / win_height``.
+    """
+    if sun_elevation <= 0.0:
+        return 1.0  # no direct beam below the horizon anyway
+    win_height = win_height or 2.0
+    dx, dy = sun_direction(sun_azimuth)
+    tan_e = math.tan(math.radians(sun_elevation))
+    max_shadow = 0.0
+    for obs in obstructions or []:
+        ring = obs.get("ring") or []
+        n = len(ring)
+        if n < 3:
+            continue
+        h = obs.get("height") or 0.0
+        if h <= 0.0:
+            continue
+        for i in range(n):
+            ax, ay = ring[i]
+            bx, by = ring[(i + 1) % n]
+            t = ray_segment_distance(win_x, win_y, dx, dy, ax, ay, bx, by)
+            if t is None or t <= self_skip_m:
+                continue
+            shadow_h = h - t * tan_e
+            if shadow_h > max_shadow:
+                max_shadow = shadow_h
+    shadowed = min(win_height, max(0.0, max_shadow))
+    return max(0.0, 1.0 - shadowed / win_height)
